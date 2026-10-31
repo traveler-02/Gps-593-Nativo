@@ -5,8 +5,12 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -19,13 +23,16 @@ import android.os.StatFs
 import android.os.SystemClock
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.maps.MapLibreMap
@@ -35,11 +42,30 @@ import org.maplibre.android.style.sources.GeoJsonSource
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.Calendar
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
+private const val VERSION = "0.2"
+
+// Tipos de ícono (dibujados con Canvas: sin imágenes ni librerías)
+private const val I_PLUS = 0
+private const val I_MINUS = 1
+private const val I_LOCATE = 2
+private const val I_MOON = 3
+private const val I_SUN = 4
+private const val I_INFO = 5
+private const val I_DOWNLOAD = 6
+private const val I_SEARCH = 7
+
+/** Colores de la interfaz según modo día/noche. */
+private class Paleta(
+    val fondo: Int, val borde: Int, val texto: Int, val sub: Int, val acento: Int, val pantalla: Int
+)
+
 /**
- * Prototipo GPS 593 nativo: solo mapa (ecuador.pmtiles) + posición GPS + panel de diagnóstico.
- * Sin AppCompat ni Compose: una sola Activity y vistas creadas por código, para arrancar rápido.
+ * GPS 593 nativo: mapa vectorial (ecuador.pmtiles) + GPS + panel de diagnóstico.
+ * Una sola Activity, vistas por código, sin AppCompat ni Compose, para arrancar rápido.
  */
 class MainActivity : Activity(), LocationListener {
 
@@ -73,12 +99,43 @@ class MainActivity : Activity(), LocationListener {
     @Volatile private var copiando = false
     private var errorMapa = ""
 
-    private lateinit var diag: TextView
-    private lateinit var aviso: TextView
-    private lateinit var btnCopiar: Button
-    private lateinit var barra: LinearLayout
+    // Vistas
+    private lateinit var raiz: FrameLayout
+    private lateinit var splash: FrameLayout
+    private lateinit var splashTitulo: TextView
+    private lateinit var splashSub: TextView
+    private lateinit var tvVelocidad: TextView
+    private lateinit var tvUnidad: TextView
+    private lateinit var tvGps: TextView
+    private lateinit var puntoGps: View
+    private lateinit var tvBusqueda: TextView
+    private lateinit var tvBanner: TextView
+    private lateinit var tvAvisoTitulo: TextView
+    private lateinit var tvAvisoTexto: TextView
+    private lateinit var tvDiag: TextView
+    private lateinit var tarjetaDiag: LinearLayout
+    private lateinit var banner: LinearLayout
+    private lateinit var tarjetaAviso: LinearLayout
+    private lateinit var btnNoche: Icono
+    private lateinit var btnCentrar: Icono
+
+    private val tarjetas = ArrayList<Pair<View, Int>>()   // vista + radio de esquina (dp)
+    private val botones = ArrayList<Icono>()
+    private val iconos = ArrayList<Icono>()
+    private var splashOculto = false
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun paleta(): Paleta =
+        if (night) Paleta(
+            fondo = Color.parseColor("#F0111827"), borde = Color.parseColor("#26FFFFFF"),
+            texto = Color.parseColor("#F1F5F9"), sub = Color.parseColor("#94A3B8"),
+            acento = Color.parseColor("#60A5FA"), pantalla = Color.parseColor("#0B1220")
+        ) else Paleta(
+            fondo = Color.parseColor("#F2FFFFFF"), borde = Color.parseColor("#14000000"),
+            texto = Color.parseColor("#0F172A"), sub = Color.parseColor("#64748B"),
+            acento = Color.parseColor("#2563EB"), pantalla = Color.parseColor("#F3F1EC")
+        )
 
     // ───────────────────────── ciclo de vida ─────────────────────────
 
@@ -86,23 +143,33 @@ class MainActivity : Activity(), LocationListener {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         tCreate = ms()
-        night = getSharedPreferences("cfg", Context.MODE_PRIVATE).getBoolean("night", false)
 
-        val root = FrameLayout(this)
-        root.setBackgroundColor(Color.parseColor("#e8e8e8"))
-        setContentView(root)
+        // Modo inicial: lo último elegido; si nunca eligió, automático por hora
+        val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        night = if (prefs.contains("night")) prefs.getBoolean("night", false) else {
+            val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+            h < 6 || h >= 18
+        }
+
+        raiz = FrameLayout(this)
+        setContentView(raiz)
 
         try {
             MapLibre.getInstance(this)
             val mv = MapView(this)
             mv.onCreate(savedInstanceState)
-            root.addView(
+            raiz.addView(
                 mv,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
             mapView = mv
             mv.addOnDidFinishLoadingStyleListener { if (tStyle == 0L) tStyle = ms() }
-            mv.addOnDidBecomeIdleListener { if (tIdle == 0L && tStyle > 0L) tIdle = ms() }
+            mv.addOnDidBecomeIdleListener {
+                if (tIdle == 0L && tStyle > 0L) {
+                    tIdle = ms()
+                    ocultarSplash()
+                }
+            }
             mv.addOnWillStartRenderingFrameListener { frames.incrementAndGet() }
             mv.addOnDidFailLoadingMapListener { msg -> errorMapa = msg ?: "error desconocido" }
             mv.getMapAsync { m -> alEstarListoElMapa(m) }
@@ -111,8 +178,11 @@ class MainActivity : Activity(), LocationListener {
             errorMapa = "No se pudo iniciar el motor de mapas: $t"
         }
 
-        crearPanel(root)
+        crearInterfaz()
+        aplicarTema()
         pedirPermisos()
+        // Si por algún motivo el mapa no termina de dibujarse, no dejes la pantalla de carga para siempre
+        ui.postDelayed({ ocultarSplash() }, 12000L)
     }
 
     override fun onStart() { super.onStart(); mapView?.onStart() }
@@ -142,63 +212,302 @@ class MainActivity : Activity(), LocationListener {
 
     // ───────────────────────── interfaz ─────────────────────────
 
-    private fun boton(texto: String, accion: () -> Unit): Button = Button(this).apply {
-        text = texto
-        isAllCaps = false
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-        minHeight = dp(56)
-        minimumHeight = dp(56)
-        setOnClickListener { accion() }
+    /** Botón redondo flotante o ícono suelto, dibujado con Canvas. */
+    private inner class Icono(ctx: Context, var tipo: Int, private val circular: Boolean) : View(ctx) {
+        var activo = false
+        private val trazo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val relleno = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
+        override fun onDraw(c: Canvas) {
+            super.onDraw(c)
+            val pal = paleta()
+            val col = if (activo) pal.acento else pal.texto
+            trazo.color = col
+            relleno.color = col
+            val k = width / 48f
+            c.save()
+            c.scale(k, k)                       // dibujamos en una cuadrícula de 48 x 48
+            trazo.strokeWidth = 2.8f
+            when (tipo) {
+                I_PLUS -> {
+                    c.drawLine(24f, 14f, 24f, 34f, trazo)
+                    c.drawLine(14f, 24f, 34f, 24f, trazo)
+                }
+                I_MINUS -> c.drawLine(14f, 24f, 34f, 24f, trazo)
+                I_LOCATE -> {
+                    c.drawCircle(24f, 24f, 9f, trazo)
+                    c.drawCircle(24f, 24f, 3.2f, relleno)
+                    c.drawLine(24f, 8f, 24f, 13f, trazo)
+                    c.drawLine(24f, 35f, 24f, 40f, trazo)
+                    c.drawLine(8f, 24f, 13f, 24f, trazo)
+                    c.drawLine(35f, 24f, 40f, 24f, trazo)
+                }
+                I_MOON -> {
+                    val a = Path().apply { addCircle(24f, 24f, 11f, Path.Direction.CW) }
+                    val b = Path().apply { addCircle(30f, 19f, 10f, Path.Direction.CW) }
+                    a.op(b, Path.Op.DIFFERENCE)
+                    c.drawPath(a, relleno)
+                }
+                I_SUN -> {
+                    c.drawCircle(24f, 24f, 6f, relleno)
+                    for (i in 0 until 8) {
+                        val ang = Math.toRadians(i * 45.0)
+                        val x1 = (24 + 10.5 * Math.cos(ang)).toFloat()
+                        val y1 = (24 + 10.5 * Math.sin(ang)).toFloat()
+                        val x2 = (24 + 14.5 * Math.cos(ang)).toFloat()
+                        val y2 = (24 + 14.5 * Math.sin(ang)).toFloat()
+                        c.drawLine(x1, y1, x2, y2, trazo)
+                    }
+                }
+                I_INFO -> {
+                    c.drawCircle(24f, 24f, 12f, trazo)
+                    c.drawLine(24f, 22f, 24f, 32f, trazo)
+                    c.drawCircle(24f, 16f, 1.9f, relleno)
+                }
+                I_DOWNLOAD -> {
+                    c.drawLine(24f, 11f, 24f, 29f, trazo)
+                    c.drawLine(16f, 22f, 24f, 30f, trazo)
+                    c.drawLine(32f, 22f, 24f, 30f, trazo)
+                    c.drawLine(13f, 37f, 35f, 37f, trazo)
+                }
+                I_SEARCH -> {
+                    c.drawCircle(21f, 21f, 10f, trazo)
+                    c.drawLine(28.5f, 28.5f, 38f, 38f, trazo)
+                }
+            }
+            c.restore()
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            if (!circular) return super.onTouchEvent(e)
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    animate().scaleX(0.9f).scaleY(0.9f).setDuration(80L).start()
+                    return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    animate().scaleX(1f).scaleY(1f).setDuration(120L).start()
+                    performClick()
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    animate().scaleX(1f).scaleY(1f).setDuration(120L).start()
+                    return true
+                }
+            }
+            return true
+        }
+
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
     }
 
-    private fun crearPanel(root: FrameLayout) {
-        diag = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#B0000000"))
-            typeface = Typeface.MONOSPACE
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+    private fun texto(sp: Float, fuente: String = "sans-serif"): TextView = TextView(this).apply {
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+        typeface = Typeface.create(fuente, Typeface.NORMAL)
+        includeFontPadding = false
+    }
+
+    private fun tarjeta(radio: Int): LinearLayout {
+        val t = LinearLayout(this)
+        tarjetas.add(Pair(t, radio))
+        return t
+    }
+
+    private fun botonRedondo(tipo: Int, tam: Int, accion: () -> Unit): Icono {
+        val b = Icono(this, tipo, true)
+        b.layoutParams = LinearLayout.LayoutParams(dp(tam), dp(tam)).apply { setMargins(0, dp(7), 0, dp(7)) }
+        b.setOnClickListener { accion() }
+        botones.add(b)
+        iconos.add(b)
+        return b
+    }
+
+    private fun crearInterfaz() {
+        val mw = ViewGroup.LayoutParams.MATCH_PARENT
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+
+        // ── Columna izquierda: velocidad + diagnóstico ──
+        val izquierda = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val cardVel = tarjeta(24).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(22), dp(14))
         }
-        root.addView(diag, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START
-        ))
-
-        aviso = TextView(this).apply {
-            setTextColor(Color.parseColor("#222222"))
-            setBackgroundColor(Color.parseColor("#F2FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-            visibility = android.view.View.GONE
-        }
-        root.addView(aviso, FrameLayout.LayoutParams(
-            dp(520), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
-        ))
-
-        btnCopiar = boton("Copiar mapa al interno") { copiarAlInterno() }
-        btnCopiar.visibility = android.view.View.GONE
-
-        barra = LinearLayout(this).apply {
+        val filaVel = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            addView(btnCopiar)
-            addView(boton("＋") { map?.animateCamera(CameraUpdateFactory.zoomIn()) })
-            addView(boton("－") { map?.animateCamera(CameraUpdateFactory.zoomOut()) })
-            addView(boton("Centrar") { centrar() })
-            addView(boton("Día/Noche") { alternarNoche() })
-            addView(boton("Diag") {
-                diag.visibility = if (diag.visibility == android.view.View.VISIBLE) android.view.View.GONE
-                else android.view.View.VISIBLE
-            })
+            gravity = Gravity.BOTTOM
         }
-        root.addView(barra, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END
-        ))
+        tvVelocidad = texto(50f, "sans-serif-light").apply { text = "0" }
+        tvUnidad = texto(14f, "sans-serif-medium").apply {
+            text = "km/h"
+            setPadding(dp(8), 0, 0, dp(8))
+        }
+        filaVel.addView(tvVelocidad)
+        filaVel.addView(tvUnidad)
+        val filaGps = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        puntoGps = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#F59E0B")) }
+        }
+        filaGps.addView(puntoGps, LinearLayout.LayoutParams(dp(9), dp(9)).apply { rightMargin = dp(8) })
+        tvGps = texto(13f, "sans-serif-medium").apply { text = "Buscando señal GPS…" }
+        filaGps.addView(tvGps)
+        cardVel.addView(filaVel)
+        cardVel.addView(filaGps)
+        izquierda.addView(cardVel, LinearLayout.LayoutParams(wc, wc))
+
+        tarjetaDiag = tarjeta(18).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            visibility = View.GONE
+        }
+        tvDiag = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            maxWidth = dp(620)
+        }
+        tarjetaDiag.addView(tvDiag)
+        izquierda.addView(tarjetaDiag, LinearLayout.LayoutParams(wc, wc).apply { topMargin = dp(10) })
+
+        raiz.addView(izquierda, FrameLayout.LayoutParams(wc, wc, Gravity.TOP or Gravity.START).apply {
+            setMargins(dp(16), dp(16), 0, 0)
+        })
+
+        // ── Arriba al centro: barra de búsqueda (aún sin función) ──
+        val pill = tarjeta(30).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), 0, dp(24), 0)
+            setOnClickListener {
+                Toast.makeText(this@MainActivity, "La búsqueda sin internet llega en la próxima versión", Toast.LENGTH_SHORT).show()
+            }
+        }
+        val icoBuscar = Icono(this, I_SEARCH, false).also { iconos.add(it) }
+        pill.addView(icoBuscar, LinearLayout.LayoutParams(dp(26), dp(26)).apply { rightMargin = dp(14) })
+        tvBusqueda = texto(17f).apply { text = "¿A dónde vamos?" }
+        pill.addView(tvBusqueda)
+        raiz.addView(pill, FrameLayout.LayoutParams(dp(420), dp(60), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(16)
+        })
+
+        // ── Derecha arriba: modo día/noche e información ──
+        val derArriba = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        btnNoche = botonRedondo(I_MOON, 56) { alternarNoche() }
+        derArriba.addView(btnNoche)
+        derArriba.addView(botonRedondo(I_INFO, 56) {
+            tarjetaDiag.visibility = if (tarjetaDiag.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        })
+        raiz.addView(derArriba, FrameLayout.LayoutParams(wc, wc, Gravity.TOP or Gravity.END).apply {
+            setMargins(0, dp(10), dp(16), 0)
+        })
+
+        // ── Derecha abajo: zoom y centrar ──
+        val derAbajo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        derAbajo.addView(botonRedondo(I_PLUS, 60) { map?.animateCamera(CameraUpdateFactory.zoomIn()) })
+        derAbajo.addView(botonRedondo(I_MINUS, 60) { map?.animateCamera(CameraUpdateFactory.zoomOut()) })
+        btnCentrar = botonRedondo(I_LOCATE, 68) { centrar() }
+        btnCentrar.activo = true
+        derAbajo.addView(btnCentrar)
+        raiz.addView(derAbajo, FrameLayout.LayoutParams(wc, wc, Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, dp(16), dp(20))
+        })
+
+        // ── Abajo al centro: aviso para copiar el mapa al almacenamiento interno ──
+        banner = tarjeta(28).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(10), dp(24), dp(10))
+            visibility = View.GONE
+            setOnClickListener { if (!copiando) copiarAlInterno() }
+        }
+        val icoBajar = Icono(this, I_DOWNLOAD, false).also { it.activo = true; iconos.add(it) }
+        banner.addView(icoBajar, LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(12) })
+        tvBanner = texto(15f, "sans-serif-medium")
+        banner.addView(tvBanner)
+        raiz.addView(banner, FrameLayout.LayoutParams(wc, wc, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(28)
+        })
+
+        // ── Centro: mapa no encontrado ──
+        tarjetaAviso = tarjeta(26).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(28), dp(24), dp(28), dp(24))
+            visibility = View.GONE
+        }
+        tvAvisoTitulo = texto(22f, "sans-serif-medium").apply { text = "Falta el mapa" }
+        tvAvisoTexto = texto(16f).apply {
+            text = "Copia ecuador.pmtiles a la raíz del pendrive, conéctalo y vuelve a abrir la app."
+            setPadding(0, dp(10), 0, 0)
+            setLineSpacing(0f, 1.15f)
+        }
+        tarjetaAviso.addView(tvAvisoTitulo)
+        tarjetaAviso.addView(tvAvisoTexto)
+        raiz.addView(tarjetaAviso, FrameLayout.LayoutParams(dp(520), wc, Gravity.CENTER))
+
+        // ── Pantalla de carga con la marca (se desvanece cuando el mapa está dibujado) ──
+        splash = FrameLayout(this)
+        val centro = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        splashTitulo = texto(38f, "sans-serif-medium").apply { text = "GPS 593"; letterSpacing = 0.12f }
+        splashSub = texto(15f).apply { text = "Cargando mapa…"; setPadding(0, dp(10), 0, 0) }
+        centro.addView(splashTitulo)
+        centro.addView(splashSub)
+        splash.addView(centro, FrameLayout.LayoutParams(wc, wc, Gravity.CENTER))
+        raiz.addView(splash, FrameLayout.LayoutParams(mw, mw))
     }
 
-    private fun mostrarAviso(texto: String?) {
-        if (texto == null) { aviso.visibility = android.view.View.GONE; return }
-        aviso.text = texto
-        aviso.visibility = android.view.View.VISIBLE
+    /** Aplica los colores del modo actual a toda la interfaz. */
+    private fun aplicarTema() {
+        val pal = paleta()
+        raiz.setBackgroundColor(pal.pantalla)
+        for ((v, r) in tarjetas) {
+            v.background = GradientDrawable().apply {
+                cornerRadius = dp(r).toFloat()
+                setColor(pal.fondo)
+                setStroke(dp(1), pal.borde)
+            }
+            v.elevation = dp(8).toFloat()
+        }
+        for (b in botones) {
+            b.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(pal.fondo)
+                setStroke(dp(1), pal.borde)
+            }
+            b.elevation = dp(7).toFloat()
+        }
+        tvVelocidad.setTextColor(pal.texto)
+        tvUnidad.setTextColor(pal.sub)
+        tvGps.setTextColor(pal.sub)
+        tvBusqueda.setTextColor(pal.sub)
+        tvBanner.setTextColor(pal.texto)
+        tvAvisoTitulo.setTextColor(pal.texto)
+        tvAvisoTexto.setTextColor(pal.sub)
+        tvDiag.setTextColor(pal.texto)
+        splash.setBackgroundColor(pal.pantalla)
+        splashTitulo.setTextColor(pal.texto)
+        splashSub.setTextColor(pal.sub)
+        btnNoche.tipo = if (night) I_SUN else I_MOON
+        btnCentrar.activo = follow
+        for (i in iconos) i.invalidate()
+    }
+
+    private fun ocultarSplash() {
+        if (splashOculto || !::splash.isInitialized) return
+        splashOculto = true
+        splash.animate().alpha(0f).setDuration(350L).withEndAction { splash.visibility = View.GONE }.start()
     }
 
     // ───────────────────────── permisos ─────────────────────────
@@ -234,13 +543,15 @@ class MainActivity : Activity(), LocationListener {
         m.uiSettings.setTiltGesturesEnabled(false)
         m.uiSettings.setCompassEnabled(false)
         m.addOnCameraMoveStartedListener { reason ->
-            if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) follow = false
+            if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
+                follow = false
+                btnCentrar.activo = false
+                btnCentrar.invalidate()
+            }
         }
         // Vista inicial: todo Ecuador
-        val ll = lastLoc
-        if (ll == null) {
-            m.cameraPosition = org.maplibre.android.camera.CameraPosition.Builder()
-                .target(LatLng(-1.65, -78.4)).zoom(6.2).build()
+        if (lastLoc == null) {
+            m.cameraPosition = CameraPosition.Builder().target(LatLng(-1.65, -78.4)).zoom(6.2).build()
         }
         cargarEstilo()
     }
@@ -287,15 +598,13 @@ class MainActivity : Activity(), LocationListener {
                 buscando = false
                 mapPath = ruta
                 if (ruta == null) {
-                    mostrarAviso(
-                        "No encuentro el mapa (.pmtiles).\n\n" +
-                            "Copia ecuador.pmtiles a la raíz del pendrive, conéctalo y vuelve a abrir la app."
-                    )
+                    tarjetaAviso.visibility = View.VISIBLE
+                    ocultarSplash()
                 } else {
-                    mostrarAviso(null)
+                    tarjetaAviso.visibility = View.GONE
                     cargarEstilo()
                 }
-                refrescarBotones()
+                actualizarBanner()
             }
         }.start()
     }
@@ -320,11 +629,14 @@ class MainActivity : Activity(), LocationListener {
     private fun alternarNoche() {
         night = !night
         getSharedPreferences("cfg", Context.MODE_PRIVATE).edit().putBoolean("night", night).apply()
+        aplicarTema()
         cargarEstilo()
     }
 
     private fun centrar() {
         follow = true
+        btnCentrar.activo = true
+        btnCentrar.invalidate()
         val l = lastLoc ?: return
         map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(l.latitude, l.longitude), 15.0))
     }
@@ -333,10 +645,17 @@ class MainActivity : Activity(), LocationListener {
         ruta.startsWith(filesDir.absolutePath) ||
             (getExternalFilesDir(null)?.let { ruta.startsWith(it.absolutePath) } ?: false)
 
-    private fun refrescarBotones() {
+    private fun actualizarBanner() {
         val r = mapPath
-        btnCopiar.visibility =
-            if (r != null && !esInterno(r) && !copiando) android.view.View.VISIBLE else android.view.View.GONE
+        if (copiando) {
+            banner.visibility = View.VISIBLE
+            tvBanner.text = if (copyStatus.isNotEmpty()) copyStatus else "Copiando mapa…"
+        } else if (r != null && !esInterno(r)) {
+            banner.visibility = View.VISIBLE
+            tvBanner.text = "Mapa en el pendrive · toca para copiarlo al interno"
+        } else {
+            banner.visibility = View.GONE
+        }
     }
 
     /** Copia el mapa del pendrive al almacenamiento interno (una sola vez) para no depender de la lectura USB. */
@@ -346,7 +665,8 @@ class MainActivity : Activity(), LocationListener {
         val carpeta = getExternalFilesDir(null) ?: filesDir
         val destino = File(carpeta, origen.name.replace(" ", "_"))
         copiando = true
-        btnCopiar.visibility = android.view.View.GONE
+        copyStatus = "Copiando mapa… 0 %"
+        actualizarBanner()
         Thread {
             try {
                 val libre = StatFs(carpeta.path).availableBytes
@@ -368,17 +688,19 @@ class MainActivity : Activity(), LocationListener {
                 }
                 if (!tmp.renameTo(destino)) throw RuntimeException("no pude renombrar el archivo")
                 ui.post {
-                    copyStatus = "Mapa copiado al interno"
+                    copyStatus = ""
                     copiando = false
                     mapPath = destino.absolutePath
                     cargarEstilo()
-                    refrescarBotones()
+                    actualizarBanner()
+                    Toast.makeText(this, "Mapa copiado: ahora carga desde el almacenamiento interno", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 ui.post {
-                    copyStatus = "Error al copiar: ${e.message}"
+                    copyStatus = ""
                     copiando = false
-                    refrescarBotones()
+                    actualizarBanner()
+                    Toast.makeText(this, "No pude copiar el mapa: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }.start()
@@ -424,6 +746,7 @@ class MainActivity : Activity(), LocationListener {
     override fun onLocationChanged(location: Location) {
         lastLoc = location
         ponerPosicion(location)
+        actualizarVelocidad()
         val m = map ?: return
         if (!follow) return
         val ll = LatLng(location.latitude, location.longitude)
@@ -441,14 +764,39 @@ class MainActivity : Activity(), LocationListener {
     override fun onProviderEnabled(provider: String) { iniciarGps() }
     override fun onProviderDisabled(provider: String) { gpsActivo = false }
 
-    // ───────────────────────── diagnóstico (cada segundo) ─────────────────────────
+    // ───────────────────────── velocímetro y diagnóstico (cada segundo) ─────────────────────────
 
     private val tick = object : Runnable {
         override fun run() {
             fps = frames.getAndSet(0)
-            actualizarDiagnostico()
+            actualizarVelocidad()
+            actualizarBanner()
+            if (tarjetaDiag.visibility == View.VISIBLE) actualizarDiagnostico()
             ui.postDelayed(this, 1000L)
         }
+    }
+
+    private fun actualizarVelocidad() {
+        val l = lastLoc
+        val edad = if (l != null) (SystemClock.elapsedRealtimeNanos() - l.elapsedRealtimeNanos) / 1_000_000_000L else -1L
+        val color: Int
+        val msg: String
+        when {
+            !tienePermisoGps() -> { color = Color.parseColor("#EF4444"); msg = "Sin permiso de ubicación" }
+            l == null -> {
+                if (gpsActivo) { color = Color.parseColor("#F59E0B"); msg = "Buscando señal GPS…" }
+                else { color = Color.parseColor("#EF4444"); msg = "GPS apagado" }
+            }
+            edad > 5 -> { color = Color.parseColor("#F59E0B"); msg = "Señal débil · hace ${edad} s" }
+            else -> {
+                color = Color.parseColor("#22C55E")
+                msg = if (l != null && l.hasAccuracy()) "GPS ±${l.accuracy.toInt()} m" else "GPS"
+            }
+        }
+        val kmh = if (l != null && edad <= 5 && l.hasSpeed()) Math.round(l.speed * 3.6f) else 0
+        tvVelocidad.text = kmh.toString()
+        tvGps.text = msg
+        (puntoGps.background as? GradientDrawable)?.setColor(color)
     }
 
     private fun t(v: Long): String = if (v > 0L) "$v ms" else "…"
@@ -471,30 +819,19 @@ class MainActivity : Activity(), LocationListener {
             "Mapa: ${f.name} (${f.length() / 1048576} MB, $donde)"
         }
         val l = lastLoc
-        val lineaGps = when {
-            !tienePermisoGps() -> "GPS: sin permiso"
-            l == null -> if (gpsActivo) "GPS: buscando señal…" else "GPS: apagado o sin señal"
-            else -> String.format(
-                java.util.Locale.US, "GPS: %.5f, %.5f  ±%.0f m  %.0f km/h  (%s)",
-                l.latitude, l.longitude, if (l.hasAccuracy()) l.accuracy else 0f,
-                if (l.hasSpeed()) l.speed * 3.6f else 0f, l.provider ?: "?"
-            )
-        }
+        val lineaGps = if (l == null) "GPS: sin posición" else String.format(
+            Locale.US, "GPS: %.5f, %.5f  %.0f km/h  (%s)",
+            l.latitude, l.longitude, if (l.hasSpeed()) l.speed * 3.6f else 0f, l.provider ?: "?"
+        )
         val sb = StringBuilder()
-        sb.append("GPS 593 nativo ${BuildConfigInfo.VERSION}  |  Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})  |  ")
+        sb.append("GPS 593 nativo $VERSION  |  Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})  |  ")
             .append(Build.SUPPORTED_ABIS.firstOrNull() ?: "?").append('\n')
         sb.append(lineaMapa).append('\n')
         sb.append("Desde el inicio: pantalla ${t(tCreate)} · motor ${t(tMapReady)} · estilo ${t(tStyle)} · mapa completo ${t(tIdle)}\n")
         sb.append("FPS: $fps   |   Memoria de la app: ${mi.totalPss / 1024} MB (java $javaMb, nativa $nativaMb)\n")
         sb.append("RAM libre del sistema: ${sis.availMem / 1048576} MB de ${sis.totalMem / 1048576} MB\n")
         sb.append(lineaGps)
-        if (copyStatus.isNotEmpty()) sb.append('\n').append(copyStatus)
         if (errorMapa.isNotEmpty()) sb.append("\nERROR: ").append(errorMapa)
-        diag.text = sb.toString()
+        tvDiag.text = sb.toString()
     }
-}
-
-/** Versión mostrada en el panel (coincide con versionName de build.gradle.kts). */
-private object BuildConfigInfo {
-    const val VERSION = "0.1"
 }
