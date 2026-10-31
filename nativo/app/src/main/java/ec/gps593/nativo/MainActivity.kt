@@ -46,7 +46,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.2"
+private const val VERSION = "0.3"
 
 // Tipos de ícono (dibujados con Canvas: sin imágenes ni librerías)
 private const val I_PLUS = 0
@@ -104,6 +104,7 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var splash: FrameLayout
     private lateinit var splashTitulo: TextView
     private lateinit var splashSub: TextView
+    private lateinit var tvEtiqueta: TextView
     private lateinit var tvVelocidad: TextView
     private lateinit var tvUnidad: TextView
     private lateinit var tvGps: TextView
@@ -344,6 +345,11 @@ class MainActivity : Activity(), LocationListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
         }
+        tvEtiqueta = texto(10f, "sans-serif-medium").apply {
+            text = "NATIVO"
+            letterSpacing = 0.2f
+            setPadding(0, 0, 0, dp(2))
+        }
         tvVelocidad = texto(50f, "sans-serif-light").apply { text = "0" }
         tvUnidad = texto(14f, "sans-serif-medium").apply {
             text = "km/h"
@@ -362,6 +368,7 @@ class MainActivity : Activity(), LocationListener {
         filaGps.addView(puntoGps, LinearLayout.LayoutParams(dp(9), dp(9)).apply { rightMargin = dp(8) })
         tvGps = texto(13f, "sans-serif-medium").apply { text = "Buscando señal GPS…" }
         filaGps.addView(tvGps)
+        cardVel.addView(tvEtiqueta)
         cardVel.addView(filaVel)
         cardVel.addView(filaGps)
         izquierda.addView(cardVel, LinearLayout.LayoutParams(wc, wc))
@@ -461,7 +468,7 @@ class MainActivity : Activity(), LocationListener {
             gravity = Gravity.CENTER_HORIZONTAL
         }
         splashTitulo = texto(38f, "sans-serif-medium").apply { text = "GPS 593"; letterSpacing = 0.12f }
-        splashSub = texto(15f).apply { text = "Cargando mapa…"; setPadding(0, dp(10), 0, 0) }
+        splashSub = texto(15f).apply { text = "Versión nativa $VERSION · cargando mapa…"; setPadding(0, dp(10), 0, 0) }
         centro.addView(splashTitulo)
         centro.addView(splashSub)
         splash.addView(centro, FrameLayout.LayoutParams(wc, wc, Gravity.CENTER))
@@ -488,6 +495,7 @@ class MainActivity : Activity(), LocationListener {
             }
             b.elevation = dp(7).toFloat()
         }
+        tvEtiqueta.setTextColor(pal.acento)
         tvVelocidad.setTextColor(pal.texto)
         tvUnidad.setTextColor(pal.sub)
         tvGps.setTextColor(pal.sub)
