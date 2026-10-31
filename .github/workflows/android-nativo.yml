@@ -1,0 +1,48 @@
+# Compila el APK NATIVO (Kotlin + MapLibre) de GPS 593 y lo publica en la Release "android-nativo".
+# Uso: pestaña Actions > "Compilar APK nativo" > Run workflow. Descarga gps593-nativo.apk desde Releases.
+name: Compilar APK nativo
+on:
+  workflow_dispatch:
+    inputs:
+      abis:
+        description: "ABIs a incluir (separadas por coma). Tu radio RK3326 de 32 bits: armeabi-v7a"
+        default: "armeabi-v7a"
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      ABIS: ${{ inputs.abis || 'armeabi-v7a' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Compilar (release, firmado con la llave de prueba)
+        working-directory: nativo
+        run: gradle :app:assembleRelease -Pabis="$ABIS" --no-daemon --stacktrace
+      - name: Verificar que el motor de mapas trae la librería para cada ABI
+        run: |
+          APK=nativo/app/build/outputs/apk/release/app-release.apk
+          ls -l "$APK"
+          unzip -l "$APK" | grep -E "lib/.*\.so" || true
+          for abi in $(echo "$ABIS" | tr ',' ' '); do
+            unzip -l "$APK" | grep -q "lib/$abi/libmaplibre.so" || {
+              echo "::error::El APK no trae libmaplibre.so para $abi (el SDK de mapas no la publica para esa arquitectura)"; exit 1; }
+          done
+          echo "OK: librerías nativas presentes para: $ABIS"
+      - name: Publicar el APK en Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp nativo/app/build/outputs/apk/release/app-release.apk gps593-nativo.apk
+          gh release view android-nativo -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create android-nativo -R "$GITHUB_REPOSITORY" --title "GPS 593 nativo (prototipo)" \
+              --notes "Prototipo nativo: mapa + GPS + panel de diagnóstico. Instálalo en la radio."
+          gh release upload android-nativo gps593-nativo.apk -R "$GITHUB_REPOSITORY" --clobber
+          echo "Descarga: https://github.com/$GITHUB_REPOSITORY/releases/tag/android-nativo"
