@@ -1,4 +1,4 @@
-# GPS 593 nativo — prototipo 0.3 (solo mapa)
+# GPS 593 nativo — prototipo 0.4 (solo mapa)
 
 App Android **nativa** (Kotlin, sin AppCompat ni Compose) que dibuja `ecuador.pmtiles` con MapLibre Native
 (OpenGL ES) y muestra tu posición GPS, con un **panel de diagnóstico** para medir en la radio.
@@ -13,26 +13,27 @@ rutas, búsqueda y voz.
    También queda en Releases > `android-nativo` como `GPS593-NATIVO.apk`.
    En el resumen de la ejecución verás `package: ec.gps593.nativo` y `application-label: GPS NATIVO`.
 
-La app anterior (web) es `ec.gps593.app`, se llama "GPS 593" y está en Releases > `android` como `gps593-debug.apk`.
-**No son la misma app**: la nativa tiene ícono azul marino con flecha blanca y aro ámbar, y se llama "GPS NATIVO".
-Para no confundirte, puedes desinstalar la anterior mientras pruebas.
+La app anterior (web) es `ec.gps593.app`, se llama "GPS 593" y está en Releases > `android`.
+La nativa es `ec.gps593.nativo` y se llama "GPS 593 nativo" (mismo logo). Para no confundirte mientras pruebas, desinstala la anterior.
 
 *Compilar en tu PC (Windows 10):* abre `nativo/` con Android Studio. Si pide Gradle, usa 8.9
 (o ejecuta una vez `gradle wrapper --gradle-version 8.9`).
 
 ## Cómo saber que abriste la app NATIVA (y no la web anterior)
-- Ícono azul marino con flecha blanca y aro ámbar; nombre **GPS NATIVO**.
-- Al abrir: pantalla "GPS 593 · Versión nativa 0.3 · cargando mapa…". Arriba a la izquierda, la tarjeta de velocidad lleva la etiqueta **NATIVO**.
-- El botón ⓘ muestra un panel que empieza con `GPS 593 nativo 0.3 | Android 11…`. La app web anterior dice "WebView Chrome".
+- Al abrir: pantalla con el logo y "Versión nativa 0.4"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
+- El botón ⓘ muestra un panel que empieza con `GPS 593 nativo 0.4 | Android …`. La app web anterior dice "WebView Chrome".
 
-## Cómo usarlo en la radio
-1. Pon `ecuador.pmtiles` (sin espacios en el nombre) en la **raíz del pendrive** y conéctalo.
-2. Abre la app y acepta los permisos (ubicación y almacenamiento).
-3. Si el mapa está en el pendrive aparece abajo **"Mapa en el pendrive · toca para copiarlo al interno"**:
-   copia una sola vez y desde entonces ya no depende del pendrive. Prueba ambas formas y compara los tiempos.
-4. Pantalla: velocímetro y estado del GPS (arriba izquierda), barra de búsqueda (aún sin función) y botones
-   redondos a la derecha: ☾/☀ día-noche, ⓘ diagnóstico, ＋ －, y centrar en mi posición.
-   El modo día/noche arranca según la hora y recuerda tu elección.
+## Cómo instalar el mapa (una sola vez)
+La primera vez aparece la tarjeta **"Instala el mapa de Ecuador"**:
+1. **Elegir archivo del mapa**: abre el selector de Android; escoge `ecuador.pmtiles` (del teléfono, del pendrive o de la nube).
+   Se copia al almacenamiento interno con una barra de progreso y se valida que sea un mapa real.
+2. **Buscar en el pendrive**: lo busca solo si el pendrive está conectado (en radios).
+Después el mapa abre al instante, sin pendrive ni copia. Si lo usas directo desde el pendrive, abajo aparece
+"Mapa en el pendrive · toca para copiarlo al interno".
+
+## Pantalla
+Tarjeta de velocidad y estado del GPS (arriba), barra de búsqueda (aún sin función), ☾/☀ día-noche y ⓘ diagnóstico
+(abajo izquierda), ＋ － y centrar (abajo derecha). La interfaz se escala sola según el tamaño de la pantalla.
 
 ## Qué mirar en el panel ⓘ (y qué anotar)
 - `Desde el inicio`: pantalla / motor / estilo / **mapa completo** (ms desde que Android crea la app).
