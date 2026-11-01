@@ -84,6 +84,13 @@ function estilo(flavor) {
     { id: 'yo-punto', type: 'circle', source: 'yo',
       paint: { 'circle-radius': 8, 'circle-color': dark ? '#60A5FA' : '#2563EB', 'circle-stroke-color': dark ? '#0B1220' : '#ffffff', 'circle-stroke-width': 3 } }
   );
+  // Marcador del lugar elegido en la búsqueda (círculo rojo con halo)
+  L.push(
+    { id: 'destino-halo', type: 'circle', source: 'destino',
+      paint: { 'circle-radius': 20, 'circle-color': '#EF4444', 'circle-opacity': 0.22 } },
+    { id: 'destino-punto', type: 'circle', source: 'destino',
+      paint: { 'circle-radius': 9, 'circle-color': '#EF4444', 'circle-stroke-color': dark ? '#0B1220' : '#ffffff', 'circle-stroke-width': 3.5 } }
+  );
   const s = {
     version: 8,
     name: 'gps-nativo-' + flavor,
@@ -91,6 +98,7 @@ function estilo(flavor) {
     sources: {
       protomaps: { type: 'vector', url: 'pmtiles://file://__PMTILES__', attribution: '© OpenStreetMap' },
       yo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      destino: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
     },
     layers: L,
   };

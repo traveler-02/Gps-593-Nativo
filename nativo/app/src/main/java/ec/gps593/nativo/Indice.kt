@@ -1,0 +1,276 @@
+package ec.gps593.nativo
+
+import android.util.JsonReader
+import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InputStreamReader
+import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.text.Normalizer
+import java.util.Locale
+
+/** Un lugar encontrado (población, calle, servicio…). */
+class Resultado(val nombre: String, val lat: Double, val lon: Double, val tipo: Int) {
+    fun tipoTexto(): String = when (tipo) {
+        0 -> "Ciudad"
+        1 -> "Pueblo"
+        2 -> "Aldea"
+        3 -> "Barrio"
+        4 -> "Caserío"
+        5 -> "Servicio"
+        6 -> "Calle"
+        else -> "Lugar"
+    }
+}
+
+object Texto {
+    /** Minúsculas y sin tildes, para buscar "peru" y encontrar "Perú". */
+    fun norm(s: String): String {
+        val d = Normalizer.normalize(s, Normalizer.Form.NFD)
+        val sb = StringBuilder(d.length)
+        for (ch in d) {
+            if (Character.getType(ch) != Character.NON_SPACING_MARK.toInt()) sb.append(ch)
+        }
+        return sb.toString().lowercase(Locale.ROOT)
+    }
+}
+
+private class IntVec {
+    var a = IntArray(1 shl 16)
+    var n = 0
+    fun add(v: Int) {
+        if (n == a.size) a = a.copyOf(n * 2)
+        a[n++] = v
+    }
+}
+
+/**
+ * Índice de lugares para buscar sin internet.
+ * Se construye UNA vez a partir del bloque JSON de lugares del archivo .g593 (ver tools/build_graph.py)
+ * y se guarda como `lugares.idx`, un archivo binario compacto que se carga en milisegundos.
+ *
+ * Formato (little-endian): "L593", versión, n, bytesNombres, bytesNorm,
+ *   lat[n], lon[n] (grados * 1e5), ctx[n], offNombre[n+1], offNorm[n+1], tipo[n] (1 byte), nombres, normalizados.
+ */
+class IndiceLugares private constructor(private val bytes: ByteArray) {
+    private val bb: ByteBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val total: Int = bb.getInt(8)
+    private val dispLen: Int = bb.getInt(12)
+    private val posLat = 20
+    private val posLon = posLat + 4 * total
+    private val posCtx = posLon + 4 * total
+    private val posDispOff = posCtx + 4 * total
+    private val posNormOff = posDispOff + 4 * (total + 1)
+    private val posTipo = posNormOff + 4 * (total + 1)
+    private val baseDisp = posTipo + total
+    private val baseNorm = baseDisp + dispLen
+
+    private fun nombreDe(i: Int): String {
+        val o0 = bb.getInt(posDispOff + 4 * i)
+        val o1 = bb.getInt(posDispOff + 4 * (i + 1))
+        return String(bytes, baseDisp + o0, o1 - o0, Charsets.UTF_8)
+    }
+
+    private fun indexOf(a: Int, b: Int, t: ByteArray): Int {
+        val m = t.size
+        if (m == 0) return a
+        val ultimo = b - m
+        var s = a
+        while (s <= ultimo) {
+            if (bytes[s] == t[0]) {
+                var k = 1
+                while (k < m && bytes[s + k] == t[k]) k++
+                if (k == m) return s
+            }
+            s++
+        }
+        return -1
+    }
+
+    /** Busca lugares cuyo nombre contenga todas las palabras (sin tildes ni mayúsculas). */
+    fun buscar(consulta: String, max: Int = 8): List<Resultado> {
+        val toks = Texto.norm(consulta).split(' ', '\t').filter { it.isNotEmpty() }
+        if (toks.isEmpty()) return emptyList()
+        val tb = toks.map { it.toByteArray(Charsets.UTF_8) }
+        val nq = toks.joinToString(" ").toByteArray(Charsets.UTF_8)
+        val hits = ArrayList<Long>()
+        var i = 0
+        while (i < total && hits.size < 4000) {
+            val a = baseNorm + bb.getInt(posNormOff + 4 * i)
+            val b = baseNorm + bb.getInt(posNormOff + 4 * (i + 1))
+            var ok = true
+            for (t in tb) {
+                if (indexOf(a, b, t) < 0) { ok = false; break }
+            }
+            if (ok) {
+                var empieza = b - a >= nq.size
+                if (empieza) {
+                    for (k in nq.indices) if (bytes[a + k] != nq[k]) { empieza = false; break }
+                }
+                val tipo = bytes[posTipo + i].toInt()
+                val score = (if (empieza) 0 else 10) + tipo
+                hits.add((score.toLong() shl 32) or i.toLong())
+            }
+            i++
+        }
+        hits.sort()
+        val vistos = HashSet<String>()
+        val out = ArrayList<Resultado>()
+        for (h in hits) {
+            if (out.size >= max) break
+            val idx = (h and 0xFFFFFFFFL).toInt()
+            val nom = nombreDe(idx)
+            val ctx = bb.getInt(posCtx + 4 * idx)
+            val completo = if (ctx >= 0 && ctx < total && ctx != idx) {
+                val c = nombreDe(ctx)
+                if (c != nom) "$nom, $c" else nom
+            } else nom
+            if (!vistos.add(completo)) continue
+            out.add(
+                Resultado(
+                    completo,
+                    bb.getInt(posLat + 4 * idx) / 1e5,
+                    bb.getInt(posLon + 4 * idx) / 1e5,
+                    bytes[posTipo + idx].toInt()
+                )
+            )
+        }
+        return out
+    }
+
+    companion object {
+        /** Carga un índice ya construido. Devuelve null si el archivo no es válido. */
+        fun cargar(f: File): IndiceLugares? {
+            val b = f.readBytes()
+            if (b.size < 20 || String(b, 0, 4, Charsets.US_ASCII) != "L593") return null
+            return IndiceLugares(b)
+        }
+
+        /** Construye `destino` leyendo los lugares del .g593. Devuelve cuántos lugares indexó. */
+        fun construir(g593: File, destino: File): Int {
+            val longitud = g593.length()
+            var jl = 0L
+            RandomAccessFile(g593, "r").use { raf ->
+                val h = ByteArray(28)
+                raf.readFully(h)
+                if (String(h, 0, 4, Charsets.US_ASCII) != "G593") throw IOException("no es un archivo .g593")
+                jl = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN).getInt(24).toLong() and 0xFFFFFFFFL
+            }
+            if (jl <= 0L || jl > longitud) throw IOException("archivo .g593 dañado")
+
+            val lat = IntVec()
+            val lon = IntVec()
+            val ctx = IntVec()
+            val tipo = IntVec()
+            val dispOff = IntVec()
+            val normOff = IntVec()
+            val disp = ByteArrayOutputStream(1 shl 20)
+            val norm = ByteArrayOutputStream(1 shl 20)
+
+            FileInputStream(g593).use { fis ->
+                fis.channel.position(longitud - jl)
+                JsonReader(InputStreamReader(BufferedInputStream(fis, 1 shl 16), Charsets.UTF_8)).use { r ->
+                    r.beginObject()
+                    while (r.hasNext()) {
+                        if (r.nextName() == "places") {
+                            r.beginArray()
+                            while (r.hasNext()) {
+                                r.beginArray()
+                                val nombre = r.nextString()
+                                val la = r.nextDouble()
+                                val lo = r.nextDouble()
+                                val ti = r.nextInt()
+                                val cx = r.nextInt()
+                                r.endArray()
+                                dispOff.add(disp.size())
+                                disp.write(nombre.toByteArray(Charsets.UTF_8))
+                                normOff.add(norm.size())
+                                norm.write(Texto.norm(nombre).toByteArray(Charsets.UTF_8))
+                                lat.add(Math.round(la * 1e5).toInt())
+                                lon.add(Math.round(lo * 1e5).toInt())
+                                tipo.add(ti)
+                                ctx.add(cx)
+                            }
+                            r.endArray()
+                        } else {
+                            r.skipValue()          // la lista "names" no hace falta aquí
+                        }
+                    }
+                    r.endObject()
+                }
+            }
+            val n = lat.n
+            dispOff.add(disp.size())
+            normOff.add(norm.size())
+            val dBytes = disp.toByteArray()
+            val nBytes = norm.toByteArray()
+
+            val tam = 20 + 4 * n * 3 + 4 * (n + 1) * 2 + n + dBytes.size + nBytes.size
+            val out = ByteBuffer.allocate(tam).order(ByteOrder.LITTLE_ENDIAN)
+            out.put("L593".toByteArray(Charsets.US_ASCII))
+            out.putInt(1)
+            out.putInt(n)
+            out.putInt(dBytes.size)
+            out.putInt(nBytes.size)
+            for (i in 0 until n) out.putInt(lat.a[i])
+            for (i in 0 until n) out.putInt(lon.a[i])
+            for (i in 0 until n) out.putInt(ctx.a[i])
+            for (i in 0..n) out.putInt(dispOff.a[i])
+            for (i in 0..n) out.putInt(normOff.a[i])
+            for (i in 0 until n) out.put(tipo.a[i].toByte())
+            out.put(dBytes)
+            out.put(nBytes)
+
+            val tmp = File(destino.path + ".tmp")
+            FileOutputStream(tmp).use { it.write(out.array(), 0, tam) }
+            if (destino.exists()) destino.delete()
+            if (!tmp.renameTo(destino)) throw IOException("no pude guardar el índice")
+            return n
+        }
+    }
+}
+
+/**
+ * Búsqueda en línea de respaldo (Photon, datos de OpenStreetMap), solo si no hay índice sin internet.
+ * Es un servicio público pensado para demostraciones: no sirve para publicar la app a gran escala.
+ */
+object BusquedaEnLinea {
+    fun buscar(q: String): List<Resultado> {
+        val url = "https://photon.komoot.io/api/?q=" + URLEncoder.encode(q, "UTF-8") +
+            "&limit=8&lat=-1.8&lon=-78.4&bbox=-92.2,-5.1,-75.0,1.7"
+        val con = URL(url).openConnection() as HttpURLConnection
+        try {
+            con.connectTimeout = 5000
+            con.readTimeout = 6000
+            con.setRequestProperty("User-Agent", "GPS593-nativo/0.5 (prototipo)")
+            if (con.responseCode != 200) return emptyList()
+            val texto = con.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val feats = JSONObject(texto).optJSONArray("features") ?: return emptyList()
+            val out = ArrayList<Resultado>()
+            for (i in 0 until feats.length()) {
+                val f = feats.getJSONObject(i)
+                val coords = f.getJSONObject("geometry").getJSONArray("coordinates")
+                val p = f.optJSONObject("properties") ?: continue
+                val partes = ArrayList<String>()
+                for (k in arrayOf("name", "street", "city", "county", "state")) {
+                    val v = p.optString(k, "")
+                    if (v.isNotEmpty() && !partes.contains(v)) partes.add(v)
+                }
+                if (partes.isEmpty()) continue
+                out.add(Resultado(partes.joinToString(", "), coords.getDouble(1), coords.getDouble(0), 6))
+            }
+            return out
+        } finally {
+            con.disconnect()
+        }
+    }
+}
