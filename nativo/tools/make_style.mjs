@@ -40,27 +40,27 @@ const DIA = {
   },
 };
 const NOCHE = {
-  background: '#0B1220', earth: '#141B2B', water: '#0C2340',
-  park_a: '#15261F', park_b: '#173126', wood_a: '#14251E', wood_b: '#14251E',
-  scrub_a: '#18261F', scrub_b: '#18261F', sand: '#1A2030', beach: '#1A2030',
-  hospital: '#201C2A', industrial: '#171E2E', school: '#1B1E2C', pedestrian: '#161D2D',
-  boundaries: '#5B6B8C',
-  other: '#27324A', minor_service: '#27324A', minor_a: '#2A3550', minor_b: '#2F3B58', link: '#34416A',
-  major: '#3C4A6B', highway: '#B98A3E',
-  minor_service_casing: '#0E1524', minor_casing: '#0E1524', link_casing: '#0E1524',
-  major_casing_early: '#1B2338', major_casing_late: '#1B2338',
-  highway_casing_early: '#5B4120', highway_casing_late: '#5B4120',
-  bridges_other: '#27324A', bridges_minor: '#2F3B58', bridges_link: '#34416A', bridges_major: '#3C4A6B', bridges_highway: '#B98A3E',
-  tunnel_other: '#1E2840', tunnel_minor: '#1E2840', tunnel_link: '#1E2840', tunnel_major: '#243050', tunnel_highway: '#6B5430',
-  roads_label_minor: '#8896B0', roads_label_minor_halo: '#141B2B',
-  roads_label_major: '#A9B6CE', roads_label_major_halo: '#141B2B',
-  ocean_label: '#4F7FB0', subplace_label: '#94A3B8', subplace_label_halo: '#0B1220',
-  city_label: '#E2E8F0', city_label_halo: '#0B1220',
-  state_label: '#64748B', state_label_halo: '#0B1220', country_label: '#8B9AB5',
+  background: '#12213F', earth: '#1A2D52', water: '#0D3B7A',
+  park_a: '#1E3A63', park_b: '#21406B', wood_a: '#1C3860', wood_b: '#1C3860',
+  scrub_a: '#1F3A5F', scrub_b: '#1F3A5F', sand: '#243557', beach: '#243557',
+  hospital: '#2A2F5C', industrial: '#1D2F55', school: '#22345F', pedestrian: '#1E3158',
+  boundaries: '#6F86B8',
+  other: '#34497B', minor_service: '#34497B', minor_a: '#3B5185', minor_b: '#41598F', link: '#47609A',
+  major: '#5570AA', highway: '#E3A547',
+  minor_service_casing: '#14213F', minor_casing: '#14213F', link_casing: '#14213F',
+  major_casing_early: '#14213F', major_casing_late: '#14213F',
+  highway_casing_early: '#7A5A22', highway_casing_late: '#7A5A22',
+  bridges_other: '#34497B', bridges_minor: '#41598F', bridges_link: '#47609A', bridges_major: '#5570AA', bridges_highway: '#E3A547',
+  tunnel_other: '#26396A', tunnel_minor: '#26396A', tunnel_link: '#2B3F72', tunnel_major: '#2F4478', tunnel_highway: '#8A6B3A',
+  roads_label_minor: '#9DB2DD', roads_label_minor_halo: '#1A2D52',
+  roads_label_major: '#C3D1EE', roads_label_major_halo: '#1A2D52',
+  ocean_label: '#6C9AE0', subplace_label: '#A5B8E0', subplace_label_halo: '#12213F',
+  city_label: '#F1F5FF', city_label_halo: '#12213F',
+  state_label: '#8296C2', state_label_halo: '#12213F', country_label: '#9FB1D9',
   landcover: {
-    grassland: 'rgba(20, 34, 28, 1)', barren: 'rgba(30, 30, 34, 1)', urban_area: 'rgba(24, 30, 44, 1)',
-    farmland: 'rgba(22, 36, 30, 1)', glacier: 'rgba(40, 48, 64, 1)', scrub: 'rgba(24, 34, 28, 1)',
-    forest: 'rgba(16, 32, 26, 1)',
+    grassland: 'rgba(30, 55, 92, 1)', barren: 'rgba(36, 49, 84, 1)', urban_area: 'rgba(28, 46, 84, 1)',
+    farmland: 'rgba(32, 56, 96, 1)', glacier: 'rgba(70, 90, 130, 1)', scrub: 'rgba(31, 55, 94, 1)',
+    forest: 'rgba(27, 50, 88, 1)',
   },
 };
 
@@ -78,11 +78,22 @@ function estilo(flavor) {
   }
   L = L.filter(l => l.type !== 'symbol' || (l.layout && l.layout['text-field']));
   const dark = flavor === 'dark';
+  // Ruta de navegación (línea con contorno), por debajo de los marcadores
+  L.push(
+    { id: 'ruta-contorno', type: 'line', source: 'ruta',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': dark ? '#0B1730' : '#FFFFFF',
+               'line-width': ['interpolate', ['linear'], ['zoom'], 6, 5, 12, 10, 17, 18] } },
+    { id: 'ruta-linea', type: 'line', source: 'ruta',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': dark ? '#5B9BFF' : '#2563EB',
+               'line-width': ['interpolate', ['linear'], ['zoom'], 6, 3, 12, 6.5, 17, 12] } }
+  );
   L.push(
     { id: 'yo-halo', type: 'circle', source: 'yo',
-      paint: { 'circle-radius': 16, 'circle-color': dark ? '#60A5FA' : '#2563EB', 'circle-opacity': 0.20 } },
+      paint: { 'circle-radius': 16, 'circle-color': dark ? '#7DB2FF' : '#2563EB', 'circle-opacity': 0.20 } },
     { id: 'yo-punto', type: 'circle', source: 'yo',
-      paint: { 'circle-radius': 8, 'circle-color': dark ? '#60A5FA' : '#2563EB', 'circle-stroke-color': dark ? '#0B1220' : '#ffffff', 'circle-stroke-width': 3 } }
+      paint: { 'circle-radius': 8, 'circle-color': dark ? '#7DB2FF' : '#2563EB', 'circle-stroke-color': dark ? '#0B1220' : '#ffffff', 'circle-stroke-width': 3 } }
   );
   // Marcador del lugar elegido en la búsqueda (círculo rojo con halo)
   L.push(
@@ -99,6 +110,7 @@ function estilo(flavor) {
       protomaps: { type: 'vector', url: 'pmtiles://file://__PMTILES__', attribution: '© OpenStreetMap' },
       yo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       destino: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      ruta: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
     },
     layers: L,
   };

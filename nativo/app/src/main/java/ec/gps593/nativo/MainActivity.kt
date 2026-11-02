@@ -68,10 +68,11 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.5"
+private const val VERSION = "0.6"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
+private const val PROV_FUSED = "fused"          // LocationManager.FUSED_PROVIDER (Android 12+)
 
 /** Colores de la interfaz según modo día/noche. */
 private class Paleta(
@@ -131,6 +132,25 @@ class MainActivity : Activity(), LocationListener {
     private var destino: Resultado? = null
     private var tts: TextToSpeech? = null
 
+    // Navegación
+    private var grafo: GrafoRutas? = null
+    private var calles: Calles? = null
+    @Volatile private var cargandoGrafo = false
+    private var errorGrafo = ""
+    private var ruta: Ruta? = null
+    private var modoRuta = 0                  // 0 sin ruta, 1 vista previa, 2 navegando
+    private var calculando = false
+    private var pasoAnunciado = IntArray(0)
+    private var fueraCont = 0
+    private var idxRuta = 0
+    private var simulando = false
+    private var simDist = 0.0
+    private var ttsListo = false
+    private var pendienteVoz: String? = null
+    private var inclinado = true
+    private var tBusquedaGps = 0L
+    private val contFix = HashMap<String, Int>()
+
     private val frames = AtomicInteger(0)
     @Volatile private var fps = 0
     private var errorMapa = ""
@@ -153,6 +173,16 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var btnCentrar: Icono
     private lateinit var izqAbajo: LinearLayout
     private lateinit var derAbajo: LinearLayout
+    private lateinit var pillBusqueda: LinearLayout
+    private lateinit var bannerNav: LinearLayout
+    private lateinit var icoNav: Icono
+    private lateinit var tvNavDist: TextView
+    private lateinit var tvNavTexto: TextView
+    private lateinit var barraNav: LinearLayout
+    private lateinit var tvNavEta: TextView
+    private lateinit var tvNavResto: TextView
+    private lateinit var btnPrimario: TextView
+    private lateinit var btnSimular: TextView
 
     // Tarjeta de instalación inicial / progreso
     private lateinit var tarjetaMapa: LinearLayout
@@ -201,11 +231,11 @@ class MainActivity : Activity(), LocationListener {
 
     private fun paleta(): Paleta =
         if (night) Paleta(
-            fondo = Color.parseColor("#F0111827"), fondoClaro = Color.parseColor("#1B2535"),
-            borde = Color.parseColor("#26FFFFFF"), texto = Color.parseColor("#F1F5F9"),
-            sub = Color.parseColor("#94A3B8"), acento = Color.parseColor("#3B82F6"),
-            acento2 = Color.parseColor("#6366F1"), pantalla = Color.parseColor("#0B1220"),
-            pantalla2 = Color.parseColor("#16233F"), hoja = Color.parseColor("#0E1626")
+            fondo = Color.parseColor("#F0162750"), fondoClaro = Color.parseColor("#1F3263"),
+            borde = Color.parseColor("#33FFFFFF"), texto = Color.parseColor("#F1F5FF"),
+            sub = Color.parseColor("#A3B3D6"), acento = Color.parseColor("#4C8DF6"),
+            acento2 = Color.parseColor("#7C6CF2"), pantalla = Color.parseColor("#12213F"),
+            pantalla2 = Color.parseColor("#1F3566"), hoja = Color.parseColor("#122244")
         ) else Paleta(
             fondo = Color.parseColor("#F2FFFFFF"), fondoClaro = Color.parseColor("#FFFFFF"),
             borde = Color.parseColor("#14000000"), texto = Color.parseColor("#0F172A"),
@@ -225,6 +255,12 @@ class MainActivity : Activity(), LocationListener {
 
     private fun carpetaApp(): File = getExternalFilesDir(null) ?: filesDir
 
+    private fun memoriaTotalMb(): Long {
+        val mi = ActivityManager.MemoryInfo()
+        (getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mi)
+        return mi.totalMem / 1048576
+    }
+
     private fun aviso(t: String) {
         Toast.makeText(this, t, Toast.LENGTH_LONG).show()
     }
@@ -242,6 +278,7 @@ class MainActivity : Activity(), LocationListener {
         modoTema = prefs.getInt("tema", 0)
         pantallaOn = prefs.getBoolean("pantalla", true)
         vozOn = prefs.getBoolean("voz", true)
+        inclinado = prefs.getBoolean("inclinado", memoriaTotalMb() >= 3500L)
         night = calcularNoche()
         if (pantallaOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -617,6 +654,33 @@ class MainActivity : Activity(), LocationListener {
         tvBusqueda = texto(16f).apply { text = "¿A dónde vamos?" }
         pill.addView(tvBusqueda)
         fila.addView(pill, LinearLayout.LayoutParams(0, dp(56), 1f).apply { leftMargin = dp(12) })
+        pillBusqueda = pill
+
+        // Banner de la próxima maniobra (reemplaza a la búsqueda mientras navegas)
+        bannerNav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(18), dp(10))
+            visibility = View.GONE
+            elevation = dp(8).toFloat()
+        }
+        icoNav = icono(R.drawable.ic_straight, 46)
+        icoNav.destacado = true
+        (icoNav.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
+        iconos.add(icoNav)
+        bannerNav.addView(icoNav)
+        val colNav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        tvNavDist = texto(30f, "sans-serif-medium").apply { setTextColor(Color.WHITE) }
+        tvNavTexto = texto(14f).apply {
+            setTextColor(Color.parseColor("#E6FFFFFF"))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(3), 0, 0)
+        }
+        colNav.addView(tvNavDist)
+        colNav.addView(tvNavTexto)
+        bannerNav.addView(colNav, LinearLayout.LayoutParams(0, wc, 1f))
+        fila.addView(bannerNav, LinearLayout.LayoutParams(0, wc, 1f).apply { leftMargin = dp(12) })
         raiz.addView(fila, FrameLayout.LayoutParams(mw, wc, Gravity.TOP).apply {
             setMargins(dp(14), dp(14), dp(14), 0)
         })
@@ -642,6 +706,7 @@ class MainActivity : Activity(), LocationListener {
         })
 
         crearTarjetaLugar()
+        crearBarraNav()
         crearTarjetaMapa()
         crearPanelBusqueda()
         crearPanelAjustes()
@@ -682,9 +747,12 @@ class MainActivity : Activity(), LocationListener {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, 0)
         }
-        abajo.addView(botonTexto("Cómo llegar", true) {
-            aviso("La navegación giro a giro llega en la próxima versión. Ya puedes buscar y guardar lugares.")
-        })
+        btnPrimario = botonTexto("Cómo llegar", true) { accionPrimaria() }
+        abajo.addView(btnPrimario)
+        abajo.addView(
+            botonTexto("Estoy aquí", false) { fijarPosicionPrueba() },
+            LinearLayout.LayoutParams(wc, wc).apply { leftMargin = dp(8) }
+        )
         abajo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         btnFav = icono(R.drawable.ic_star_line, 34)
         iconos.add(btnFav)
@@ -692,6 +760,28 @@ class MainActivity : Activity(), LocationListener {
         abajo.addView(btnFav)
         tarjetaLugar.addView(abajo)
         raiz.addView(tarjetaLugar, FrameLayout.LayoutParams(dp(480), wc, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(24)
+        })
+    }
+
+    private fun crearBarraNav() {
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+        barraNav = tarjeta(26).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(12), dp(14), dp(12))
+            visibility = View.GONE
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        tvNavEta = texto(22f, "sans-serif-medium")
+        tvNavResto = texto(12.5f).apply { setPadding(0, dp(3), 0, 0) }
+        col.addView(tvNavEta)
+        col.addView(tvNavResto)
+        barraNav.addView(col, LinearLayout.LayoutParams(0, wc, 1f))
+        btnSimular = botonTexto("Simular", false) { alternarSimulacion() }
+        barraNav.addView(btnSimular, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(8) })
+        barraNav.addView(botonTexto("Salir", true) { finalizarNavegacion(false) })
+        raiz.addView(barraNav, FrameLayout.LayoutParams(dp(480), wc, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
             bottomMargin = dp(24)
         })
     }
@@ -886,8 +976,10 @@ class MainActivity : Activity(), LocationListener {
             if (w > h) Math.min(dp(560), (w * 0.62f).toInt()) else ViewGroup.LayoutParams.MATCH_PARENT
         (cardBusqueda.layoutParams as FrameLayout.LayoutParams).width = Math.min(dp(640), w - dp(28))
         (scrollResultados.layoutParams as LinearLayout.LayoutParams).height = Math.min(dp(320), (h * 0.5f).toInt())
-        (tarjetaLugar.layoutParams as FrameLayout.LayoutParams).width =
-            if (w < dp(760)) w - dp(28) else Math.min(dp(520), w - dp(180))
+        val anchoInf = if (w < dp(760)) w - dp(28) else Math.min(dp(520), w - dp(180))
+        (tarjetaLugar.layoutParams as FrameLayout.LayoutParams).width = anchoInf
+        (barraNav.layoutParams as FrameLayout.LayoutParams).width = anchoInf
+        barraNav.requestLayout()
         tarjetaMapa.requestLayout()
         hojaAjustes.requestLayout()
         cardBusqueda.requestLayout()
@@ -898,7 +990,9 @@ class MainActivity : Activity(), LocationListener {
     private fun ajustarColumnas() {
         tarjetaLugar.post {
             val estrecho = anchoPx < dp(760)
-            val sube = if (estrecho && tarjetaLugar.visibility == View.VISIBLE) -(tarjetaLugar.height + dp(10)).toFloat() else 0f
+            val inf: View? = if (barraNav.visibility == View.VISIBLE) barraNav
+            else if (tarjetaLugar.visibility == View.VISIBLE) tarjetaLugar else null
+            val sube = if (estrecho && inf != null) -(inf.height + dp(10)).toFloat() else 0f
             derAbajo.animate().translationY(sube).setDuration(150L).start()
             izqAbajo.animate().translationY(sube).setDuration(150L).start()
         }
@@ -957,6 +1051,11 @@ class MainActivity : Activity(), LocationListener {
         tvPct.setTextColor(pal.sub)
         tvLugarTitulo.setTextColor(pal.texto)
         tvLugarSub.setTextColor(pal.sub)
+        bannerNav.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(pal.acento, pal.acento2)).apply {
+            cornerRadius = dp(26).toFloat()
+        }
+        tvNavEta.setTextColor(pal.texto)
+        tvNavResto.setTextColor(pal.sub)
         etBusqueda.setTextColor(pal.texto)
         etBusqueda.setHintTextColor(pal.sub)
         splash.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(pal.pantalla, pal.pantalla2))
@@ -1002,9 +1101,16 @@ class MainActivity : Activity(), LocationListener {
         Build.VERSION.SDK_INT < 23 ||
             checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
+    private fun tieneAlgunPermiso(): Boolean =
+        Build.VERSION.SDK_INT < 23 || tienePermisoGps() ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
     private fun pedirPermisoUbicacion() {
-        if (!tienePermisoGps()) {
-            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_PERM_UBICACION)
+        if (!tieneAlgunPermiso()) {
+            requestPermissions(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                REQ_PERM_UBICACION
+            )
         } else {
             iniciarGps()
         }
@@ -1030,6 +1136,11 @@ class MainActivity : Activity(), LocationListener {
                 follow = false
                 actualizarBotonCentrar()
             }
+        }
+        // Mantener pulsado = elegir ese punto del mapa (destino o posición de prueba)
+        m.addOnMapLongClickListener { p ->
+            seleccionarResultado(Resultado("Punto elegido en el mapa", p.latitude, p.longitude, 7))
+            true
         }
         // Vista inicial: todo Ecuador
         if (lastLoc == null) {
@@ -1059,20 +1170,21 @@ class MainActivity : Activity(), LocationListener {
             estilo = style
             ponerPosicion(lastLoc)
             ponerDestino()
+            ponerRuta()
         }
     }
 
     private fun centrar() {
         follow = true
         actualizarBotonCentrar()
-        if (!tienePermisoGps()) {
+        if (!tieneAlgunPermiso()) {
             aviso("Permite el acceso a la ubicación para centrar el mapa en tu posición.")
             pedirPermisoUbicacion()
             return
         }
         val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val l = lastLoc
-        if (l != null && edadSeg(l) <= 120L) {
+        if (l != null && (esSintetica(l) || edadSeg(l) <= 120L)) {
             map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(l.latitude, l.longitude), 15.0))
             return
         }
@@ -1083,8 +1195,12 @@ class MainActivity : Activity(), LocationListener {
             try { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) } catch (e: Exception) { /* sin pantalla de ajustes */ }
             return
         }
-        aviso("Buscando tu posición… En interiores el GPS puede tardar; sal a cielo abierto.")
+        aviso(
+            "Aún sin posición. Permiso: ${permisoTexto()}. Proveedores: ${proveedoresTexto()}. " +
+                "Si estás en interiores, sal a cielo abierto o mantén pulsado el mapa y toca «Estoy aquí»."
+        )
         gpsActivo = false
+        tBusquedaGps = 0L
         iniciarGps()
     }
 
@@ -1305,6 +1421,9 @@ class MainActivity : Activity(), LocationListener {
                 if (nuevoMapa) cargarEstilo()
                 if (nuevasRutas) {
                     indice = null
+                    grafo = null
+                    calles = null
+                    errorGrafo = ""
                     prepararIndice()
                 }
                 if (errores.isEmpty() && (nuevoMapa || nuevasRutas)) aviso("Listo: los archivos quedaron instalados.")
@@ -1324,13 +1443,34 @@ class MainActivity : Activity(), LocationListener {
         Thread {
             try {
                 val idx = File(g.parentFile, "lugares.idx")
-                if (!idx.exists() || idx.lastModified() < g.lastModified()) IndiceLugares.construir(g, idx)
+                val nombresCalles = File(g.parentFile, "calles.idx")
+                if (!idx.exists() || !nombresCalles.exists() || idx.lastModified() < g.lastModified()) {
+                    IndiceLugares.construir(g, idx)
+                }
                 val ind = IndiceLugares.cargar(idx) ?: throw RuntimeException("índice no válido")
+                val cl = Calles.cargar(nombresCalles)
                 ui.post {
                     indice = ind
+                    calles = cl
                     indexando = false
+                    cargandoGrafo = true
                     refrescarAjustes()
                     if (panelBusqueda.visibility == View.VISIBLE) mostrarResultados(ultimosResultados, ultimaConsulta, ultimoOrigen)
+                }
+                // Motor de rutas: mapea el .g593 y prepara la cuadrícula de calles
+                try {
+                    val gr = GrafoRutas.abrir(g, cl)
+                    ui.post {
+                        grafo = gr
+                        cargandoGrafo = false
+                        refrescarAjustes()
+                    }
+                } catch (e2: Throwable) {
+                    ui.post {
+                        cargandoGrafo = false
+                        errorGrafo = if (e2 is OutOfMemoryError) "sin memoria para preparar las rutas" else (e2.message ?: "error")
+                        refrescarAjustes()
+                    }
                 }
             } catch (e: Throwable) {
                 ui.post {
@@ -1487,6 +1627,7 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun seleccionarResultado(r: Resultado) {
+        if (modoRuta != 0) cancelarRuta()
         if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
         if (panelAjustes.visibility == View.VISIBLE) cerrarAjustes()
         destino = r
@@ -1502,6 +1643,7 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun ocultarLugar() {
+        if (modoRuta != 0) cancelarRuta()
         destino = null
         ponerDestino()
         tarjetaLugar.visibility = View.GONE
@@ -1703,7 +1845,12 @@ class MainActivity : Activity(), LocationListener {
         when {
             rutasPath == null -> { rutasSub = "No instalado · la búsqueda usará internet"; rutasOk = false }
             indexando -> { rutasSub = "Preparando la búsqueda… (una sola vez, puede tardar un poco)"; rutasOk = null }
-            ind != null -> { rutasSub = "Instalado · ${mbDe(rutasPath)} MB · ${ind.total} lugares para buscar"; rutasOk = true }
+            ind != null -> {
+                val motor = if (grafo != null) "rutas listas" else if (cargandoGrafo) "preparando rutas…"
+                else if (errorGrafo.isNotEmpty()) "rutas: $errorGrafo" else "rutas no listas"
+                rutasSub = "Instalado · ${mbDe(rutasPath)} MB · ${ind.total} lugares · $motor"
+                rutasOk = grafo != null
+            }
             errorIndice.isNotEmpty() -> { rutasSub = "Instalado, pero no pude preparar la búsqueda: $errorIndice"; rutasOk = false }
             else -> { rutasSub = "Instalado · ${mbDe(rutasPath)} MB"; rutasOk = null }
         }
@@ -1828,6 +1975,12 @@ class MainActivity : Activity(), LocationListener {
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         })
 
+        c.addView(seccion("Navegación"))
+        c.addView(filaInterruptor("Mapa inclinado (3D)", "Más atractivo; desactívalo si tu equipo va lento", inclinado) { v ->
+            inclinado = v
+            prefs.edit().putBoolean("inclinado", v).apply()
+        })
+
         c.addView(seccion("Voz"))
         c.addView(filaInterruptor("Instrucciones por voz", "Se usarán durante la navegación", vozOn) { v ->
             vozOn = v
@@ -1838,24 +1991,33 @@ class MainActivity : Activity(), LocationListener {
         c.addView(probar)
     }
 
-    private fun probarVoz() {
+    /** Habla un texto (si la voz está activada o se fuerza, p. ej. en "Probar voz"). */
+    private fun hablar(t: String, forzar: Boolean = false) {
+        if (!vozOn && !forzar) return
         val actual = tts
         if (actual == null) {
+            pendienteVoz = t
             tts = TextToSpeech(this) { estado ->
                 if (estado == TextToSpeech.SUCCESS) {
-                    tts?.setLanguage(Locale("es", "EC"))
-                    hablarPrueba()
+                    val r = tts?.setLanguage(Locale("es", "EC")) ?: -2
+                    if (r < 0) tts?.setLanguage(Locale("es"))
+                    ttsListo = true
+                    val p = pendienteVoz
+                    pendienteVoz = null
+                    if (p != null) tts?.speak(p, TextToSpeech.QUEUE_FLUSH, null, "nav")
                 } else {
                     aviso("Este equipo no tiene una voz instalada.")
                 }
             }
+        } else if (ttsListo) {
+            actual.speak(t, TextToSpeech.QUEUE_FLUSH, null, "nav")
         } else {
-            hablarPrueba()
+            pendienteVoz = t
         }
     }
 
-    private fun hablarPrueba() {
-        tts?.speak("En doscientos metros, gire a la derecha.", TextToSpeech.QUEUE_FLUSH, null, "prueba")
+    private fun probarVoz() {
+        hablar("En doscientos metros, gire a la derecha.", true)
     }
 
     private fun tabAcerca() {
@@ -1906,30 +2068,73 @@ class MainActivity : Activity(), LocationListener {
     private fun edadSeg(l: Location): Long =
         (SystemClock.elapsedRealtimeNanos() - l.elapsedRealtimeNanos) / 1_000_000_000L
 
-    /** Pide posiciones al GPS y también a la red (wifi/celular): en interiores la red localiza al instante, aproximado. */
+    /** Posición de prueba (fijada a mano) o simulada: no depende del GPS. */
+    private fun esSintetica(l: Location): Boolean = l.provider == "prueba" || l.provider == "simulado"
+
+    private fun permisoTexto(): String = when {
+        tienePermisoGps() -> "precisa"
+        tieneAlgunPermiso() -> "solo aproximada"
+        else -> "sin permiso"
+    }
+
+    private fun listaProveedores(): List<String> {
+        val l = ArrayList<String>()
+        l.add(LocationManager.GPS_PROVIDER)
+        l.add(LocationManager.NETWORK_PROVIDER)
+        if (Build.VERSION.SDK_INT >= 31) l.add(PROV_FUSED)
+        return l
+    }
+
+    private fun nombreProveedor(p: String): String = when (p) {
+        LocationManager.GPS_PROVIDER -> "GPS"
+        LocationManager.NETWORK_PROVIDER -> "red"
+        LocationManager.PASSIVE_PROVIDER -> "pasivo"
+        else -> "fusionado"
+    }
+
+    private fun proveedoresTexto(): String {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val sb = StringBuilder()
+        for (p in listaProveedores()) {
+            val on = try { lm.isProviderEnabled(p) } catch (e: Exception) { false }
+            if (sb.isNotEmpty()) sb.append("  ")
+            sb.append(nombreProveedor(p)).append(if (on) " ✓" else " ✗")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Pide posiciones al GPS, a la red (wifi/celular), al proveedor fusionado (Android 12+) y al pasivo
+     * (las que obtienen otras apps): en interiores la red o el fusionado localizan al instante, de forma aproximada.
+     */
     private fun iniciarGps() {
-        if (gpsActivo || !tienePermisoGps()) return
+        if (gpsActivo || !tieneAlgunPermiso()) return
         val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         var alguno = false
-        try {
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this)
-                alguno = true
-            }
-        } catch (e: SecurityException) { /* sin permiso preciso */ } catch (e: Exception) { /* proveedor no disponible */ }
-        try {
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 0f, this)
-                alguno = true
-            }
-        } catch (e: SecurityException) { /* nada */ } catch (e: Exception) { /* nada */ }
+        val pedidos = ArrayList<Pair<String, Long>>()
+        pedidos.add(Pair(LocationManager.GPS_PROVIDER, 1000L))
+        pedidos.add(Pair(LocationManager.NETWORK_PROVIDER, 3000L))
+        if (Build.VERSION.SDK_INT >= 31) pedidos.add(Pair(PROV_FUSED, 2000L))
+        pedidos.add(Pair(LocationManager.PASSIVE_PROVIDER, 0L))
+        for ((prov, cada) in pedidos) {
+            try {
+                if (lm.isProviderEnabled(prov)) {
+                    lm.requestLocationUpdates(prov, cada, 0f, this)
+                    alguno = true
+                }
+            } catch (e: SecurityException) { /* sin permiso para este proveedor */ } catch (e: Exception) { /* no disponible */ }
+        }
         gpsActivo = alguno
+        if (alguno && tBusquedaGps == 0L) tBusquedaGps = SystemClock.elapsedRealtime()
         if (lastLoc == null) {
-            for (prov in arrayOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            for (prov in listaProveedores() + LocationManager.PASSIVE_PROVIDER) {
                 try {
                     val k = lm.getLastKnownLocation(prov)
                     // Solo si es reciente: una posición vieja no sirve para centrar el mapa
-                    if (k != null && edadSeg(k) < 120L) { onLocationChanged(k); break }
+                    if (k != null && edadSeg(k) < 120L) {
+                        procesarUbicacion(k)
+                        break
+                    }
                 } catch (e: Exception) { /* nada */ }
             }
         }
@@ -1951,18 +2156,34 @@ class MainActivity : Activity(), LocationListener {
     }
 
     override fun onLocationChanged(location: Location) {
+        if (simulando) return                       // durante la simulación se ignora el GPS real
+        val prov = location.provider ?: "?"
+        contFix[prov] = (contFix[prov] ?: 0) + 1
         val prev = lastLoc
         // Si ya hay un GPS reciente, ignora la posición aproximada de la red
-        if (prev != null && location.provider == LocationManager.NETWORK_PROVIDER &&
+        if (prev != null && prov == LocationManager.NETWORK_PROVIDER &&
             prev.provider == LocationManager.GPS_PROVIDER && edadSeg(prev) < 15L
         ) return
+        procesarUbicacion(location)
+    }
+
+    /** Punto único por donde pasa toda posición (GPS real, de prueba o simulada). */
+    private fun procesarUbicacion(location: Location) {
         lastLoc = location
         ponerPosicion(location)
         actualizarVelocidad()
+        if (modoRuta == 2) actualizarNavegacion(location)
         val m = map ?: return
         if (!follow) return
         val ll = LatLng(location.latitude, location.longitude)
-        if (!primerFix) {
+        if (modoRuta == 2) {
+            // Cámara de conducción: sigue tu posición, gira hacia donde avanzas y se aleja con la velocidad
+            val kmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
+            val zoom = if (kmh < 25f) 17.4 else if (kmh < 60f) 16.6 else 15.8
+            val b = CameraPosition.Builder().target(ll).zoom(zoom).tilt(if (inclinado) 45.0 else 0.0)
+            if (location.hasBearing() && location.speed > 1.5f) b.bearing(location.bearing.toDouble())
+            m.animateCamera(CameraUpdateFactory.newCameraPosition(b.build()), 900)
+        } else if (!primerFix) {
             primerFix = true
             m.animateCamera(CameraUpdateFactory.newLatLngZoom(ll, 15.0))
         } else {
@@ -1975,6 +2196,302 @@ class MainActivity : Activity(), LocationListener {
     override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     override fun onProviderEnabled(provider: String) { iniciarGps() }
     override fun onProviderDisabled(provider: String) { gpsActivo = false }
+
+    // ───────────────────────── navegación ─────────────────────────
+
+    private fun hora(seg: Double): String =
+        java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+            .format(java.util.Date(System.currentTimeMillis() + (seg * 1000.0).toLong()))
+
+    private fun tiempo(seg: Double): String {
+        val m = Math.max(1L, Math.round(seg / 60.0))
+        return if (m < 60L) "$m min" else "${m / 60} h ${String.format(Locale.US, "%02d", m % 60)} min"
+    }
+
+    private fun minuscula(t: String): String = t.replaceFirstChar { it.lowercase() }
+
+    private fun redondeo(d: Double): Long =
+        if (d > 100.0) Math.round(d / 50.0) * 50 else Math.round(d / 10.0) * 10
+
+    /** Posición desde la que sale la ruta: el GPS reciente o la posición de prueba. */
+    private fun origenActual(): Location? {
+        val l = lastLoc ?: return null
+        return if (esSintetica(l) || edadSeg(l) <= 60L) l else null
+    }
+
+    private fun accionPrimaria() {
+        val d = destino ?: return
+        if (modoRuta == 1) iniciarNavegacion() else calcularRuta(d)
+    }
+
+    private fun calcularRuta(d: Resultado) {
+        if (calculando) return
+        if (rutasPath == null) {
+            aviso("Para calcular rutas instala el archivo ecuador.g593 en Ajustes › Mapas.")
+            abrirAjustes(0)
+            return
+        }
+        val g = grafo
+        if (g == null) {
+            aviso(
+                if (indexando || cargandoGrafo) "Preparando el motor de rutas… intenta de nuevo en unos segundos."
+                else "El motor de rutas no está listo" + (if (errorGrafo.isNotEmpty()) ": $errorGrafo" else ".")
+            )
+            return
+        }
+        val o = origenActual()
+        if (o == null) {
+            aviso("Aún no tengo tu posición. Espera el GPS, o mantén pulsado el mapa donde estés y toca «Estoy aquí».")
+            return
+        }
+        calculando = true
+        btnPrimario.text = "Calculando…"
+        val oLat = o.latitude
+        val oLon = o.longitude
+        Thread {
+            var r: Ruta? = null
+            var err = ""
+            try {
+                r = g.ruta(oLat, oLon, d.lat, d.lon)
+            } catch (e: Throwable) {
+                err = if (e is OutOfMemoryError) "No hay memoria suficiente para calcular esta ruta." else (e.message ?: "No pude calcular la ruta.")
+            }
+            val rr = r
+            ui.post {
+                calculando = false
+                if (rr == null || destino !== d) {
+                    btnPrimario.text = "Cómo llegar"
+                    if (rr == null) aviso(err)
+                } else {
+                    vistaPrevia(rr)
+                }
+            }
+        }.start()
+    }
+
+    private fun vistaPrevia(r: Ruta) {
+        ruta = r
+        modoRuta = 1
+        ponerRuta()
+        btnPrimario.text = "Iniciar"
+        tvLugarSub.text = "${Geo.dist(r.distancia)} · ${tiempo(r.duracion)} · llegas ${hora(r.duracion)}"
+        try {
+            val b = org.maplibre.android.geometry.LatLngBounds.Builder()
+            val paso = Math.max(1, r.lat.size / 300)
+            var i = 0
+            while (i < r.lat.size) {
+                b.include(LatLng(r.lat[i], r.lon[i]))
+                i += paso
+            }
+            b.include(LatLng(r.lat[r.lat.size - 1], r.lon[r.lon.size - 1]))
+            map?.animateCamera(CameraUpdateFactory.newLatLngBounds(b.build(), dp(80), dp(90), dp(80), dp(190)))
+        } catch (e: Exception) { /* ruta de un solo punto */ }
+    }
+
+    private fun iniciarNavegacion() {
+        val r = ruta ?: return
+        modoRuta = 2
+        follow = true
+        actualizarBotonCentrar()
+        fueraCont = 0
+        idxRuta = 0
+        pasoAnunciado = IntArray(r.pasos.size)
+        tarjetaLugar.visibility = View.GONE
+        pillBusqueda.visibility = View.GONE
+        bannerNav.visibility = View.VISIBLE
+        barraNav.visibility = View.VISIBLE
+        btnSimular.text = if (simulando) "Detener" else "Simular"
+        ajustarColumnas()
+        hablar(r.pasos[0].texto())
+        val l = lastLoc
+        if (l != null) {
+            actualizarNavegacion(l)
+            val m = map
+            if (m != null) {
+                val b = CameraPosition.Builder(m.cameraPosition).target(LatLng(l.latitude, l.longitude)).zoom(17.0)
+                    .tilt(if (inclinado) 45.0 else 0.0)
+                m.animateCamera(CameraUpdateFactory.newCameraPosition(b.build()), 700)
+            }
+        }
+    }
+
+    /** Calcula en qué punto de la ruta vas, la próxima maniobra, el tiempo restante y la voz. */
+    private fun actualizarNavegacion(l: Location) {
+        val r = ruta ?: return
+        if (r.total <= 0.0) return
+        var u = r.ubicar(l.latitude, l.longitude, idxRuta - 15, idxRuta + 250)
+        if (u.d > 60.0) u = r.ubicar(l.latitude, l.longitude, 0, r.lat.size - 2)
+        idxRuta = u.i
+        if (u.d > 55.0 && !simulando) {
+            fueraCont++
+            if (fueraCont >= 4) {
+                fueraCont = 0
+                recalcularRuta(l)
+                return
+            }
+        } else {
+            fueraCont = 0
+        }
+        val restante = Math.max(0.0, r.total - u.along)
+        val eta = r.duracion * (restante / r.total)
+        var k = 0
+        while (k + 1 < r.pasos.size && r.pasos[k + 1].inicio <= u.along) k++
+        val sig = Math.min(k + 1, r.pasos.size - 1)
+        val p = r.pasos[sig]
+        val aSig = Math.max(0.0, p.inicio - u.along)
+        icoNav.res = p.icono()
+        icoNav.invalidate()
+        tvNavDist.text = Geo.dist(aSig)
+        tvNavTexto.text = p.texto()
+        tvNavEta.text = hora(eta)
+        tvNavResto.text = "${Geo.dist(restante)} · ${tiempo(eta)}"
+        anunciar(sig, aSig, p)
+        if (restante < 25.0) finalizarNavegacion(true)
+    }
+
+    private fun anunciar(idx: Int, aSig: Double, p: Paso) {
+        if (idx >= pasoAnunciado.size) return
+        val a = pasoAnunciado[idx]
+        if (p.tipo == "arrive") {
+            if (aSig <= 150.0 && (a and 1) == 0) {
+                pasoAnunciado[idx] = a or 1
+                hablar("Tu destino está a ${Math.round(aSig / 10.0) * 10} metros")
+            }
+            return
+        }
+        if (aSig <= 40.0 && (a and 4) == 0) {
+            pasoAnunciado[idx] = a or 7
+            hablar(p.texto())
+        } else if (aSig > 40.0 && aSig <= 160.0 && (a and 2) == 0) {
+            pasoAnunciado[idx] = a or 3
+            hablar("En ${redondeo(aSig)} metros, " + minuscula(p.texto()))
+        } else if (aSig > 160.0 && aSig <= 450.0 && (a and 1) == 0) {
+            pasoAnunciado[idx] = a or 1
+            hablar("En ${redondeo(aSig)} metros, " + minuscula(p.texto()))
+        }
+    }
+
+    private fun recalcularRuta(l: Location) {
+        val d = destino ?: return
+        val g = grafo ?: return
+        if (calculando) return
+        calculando = true
+        aviso("Recalculando ruta…")
+        hablar("Recalculando")
+        val la = l.latitude
+        val lo = l.longitude
+        Thread {
+            var rr: Ruta? = null
+            try {
+                rr = g.ruta(la, lo, d.lat, d.lon)
+            } catch (e: Throwable) { /* se intentará de nuevo en unos segundos */ }
+            val nueva = rr
+            ui.post {
+                calculando = false
+                if (nueva != null && modoRuta == 2) {
+                    ruta = nueva
+                    ponerRuta()
+                    pasoAnunciado = IntArray(nueva.pasos.size)
+                    idxRuta = 0
+                    val ult = lastLoc
+                    if (ult != null) actualizarNavegacion(ult)
+                }
+            }
+        }.start()
+    }
+
+    private fun finalizarNavegacion(llegada: Boolean) {
+        if (llegada) {
+            hablar("Has llegado a tu destino")
+            aviso("Has llegado a tu destino")
+        }
+        cancelarRuta()
+        destino = null
+        ponerDestino()
+        tarjetaLugar.visibility = View.GONE
+        ajustarColumnas()
+        val m = map
+        if (m != null) {
+            m.animateCamera(
+                CameraUpdateFactory.newCameraPosition(CameraPosition.Builder(m.cameraPosition).bearing(0.0).tilt(0.0).build()),
+                600
+            )
+        }
+    }
+
+    /** Quita la ruta y vuelve a la pantalla normal (sin tocar el destino). */
+    private fun cancelarRuta() {
+        simulando = false
+        ui.removeCallbacks(simTick)
+        ruta = null
+        modoRuta = 0
+        calculando = false
+        ponerRuta()
+        btnPrimario.text = "Cómo llegar"
+        bannerNav.visibility = View.GONE
+        barraNav.visibility = View.GONE
+        pillBusqueda.visibility = View.VISIBLE
+        ajustarColumnas()
+    }
+
+    private fun ponerRuta() {
+        val r = ruta
+        val json = if (r == null) "{\"type\":\"FeatureCollection\",\"features\":[]}" else r.geojson()
+        estilo?.getSourceAs<GeoJsonSource>("ruta")?.setGeoJson(json)
+    }
+
+    // ── Simulación del recorrido (para probar sin salir a la calle) ──
+
+    private val simTick = object : Runnable {
+        override fun run() {
+            val r = ruta
+            if (!simulando || r == null || modoRuta != 2) return
+            simDist += 14.0                                   // ≈ 50 km/h
+            val pe = r.puntoEn(simDist)
+            val loc = Location("simulado")
+            loc.latitude = pe[0]
+            loc.longitude = pe[1]
+            loc.bearing = pe[2].toFloat()
+            loc.speed = 14f
+            loc.accuracy = 5f
+            loc.time = System.currentTimeMillis()
+            loc.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+            procesarUbicacion(loc)
+            if (simulando && modoRuta == 2) ui.postDelayed(this, 1000L)
+        }
+    }
+
+    private fun alternarSimulacion() {
+        val r = ruta ?: return
+        if (modoRuta != 2) return
+        simulando = !simulando
+        btnSimular.text = if (simulando) "Detener" else "Simular"
+        if (simulando) {
+            val l = lastLoc
+            simDist = if (l != null) r.ubicar(l.latitude, l.longitude, 0, r.lat.size - 2).along else 0.0
+            follow = true
+            actualizarBotonCentrar()
+            ui.post(simTick)
+        } else {
+            ui.removeCallbacks(simTick)
+        }
+    }
+
+    /** Fija una posición de prueba (útil en interiores o para probar rutas desde cualquier punto). */
+    private fun fijarPosicionPrueba() {
+        val d = destino ?: return
+        val loc = Location("prueba")
+        loc.latitude = d.lat
+        loc.longitude = d.lon
+        loc.accuracy = 5f
+        loc.time = System.currentTimeMillis()
+        loc.elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+        ocultarLugar()
+        follow = true
+        actualizarBotonCentrar()
+        procesarUbicacion(loc)
+        aviso("Posición de prueba fijada. Ahora busca o elige un destino y toca «Cómo llegar».")
+    }
 
     // ───────────────────────── velocímetro y diagnóstico (cada segundo) ─────────────────────────
 
@@ -1992,25 +2509,29 @@ class MainActivity : Activity(), LocationListener {
         val l = lastLoc
         val edad = if (l != null) edadSeg(l) else -1L
         val acc = if (l != null && l.hasAccuracy()) l.accuracy.toInt() else -1
+        val buscandoMucho = tBusquedaGps != 0L && SystemClock.elapsedRealtime() - tBusquedaGps > 20000L
         val color: Int
         val msg: String
         when {
-            !tienePermisoGps() -> { color = Color.parseColor("#EF4444"); msg = "Sin permiso de ubicación" }
+            !tieneAlgunPermiso() -> { color = Color.parseColor("#EF4444"); msg = "Sin permiso de ubicación" }
+            l != null && l.provider == "simulado" -> { color = Color.parseColor("#A78BFA"); msg = "Simulando recorrido" }
+            l != null && l.provider == "prueba" -> { color = Color.parseColor("#A78BFA"); msg = "Posición de prueba" }
             l == null -> {
-                if (gpsActivo) { color = Color.parseColor("#F59E0B"); msg = "Buscando señal GPS…" }
-                else { color = Color.parseColor("#EF4444"); msg = "Ubicación apagada" }
+                if (!gpsActivo) { color = Color.parseColor("#EF4444"); msg = "Ubicación apagada" }
+                else if (buscandoMucho) { color = Color.parseColor("#F59E0B"); msg = "Sin señal · mantén pulsado el mapa" }
+                else { color = Color.parseColor("#F59E0B"); msg = "Buscando señal GPS…" }
             }
             edad > 15 -> { color = Color.parseColor("#F59E0B"); msg = "Sin señal GPS reciente" }
-            l?.provider == LocationManager.NETWORK_PROVIDER -> {
-                color = Color.parseColor("#38BDF8")
-                msg = if (acc >= 0) "Ubicación aprox. ±$acc m" else "Ubicación aproximada"
-            }
-            else -> {
+            l?.provider == LocationManager.GPS_PROVIDER -> {
                 color = Color.parseColor("#22C55E")
                 msg = if (acc >= 0) "GPS ±$acc m" else "GPS"
             }
+            else -> {
+                color = Color.parseColor("#38BDF8")
+                msg = if (acc >= 0) "Ubicación aprox. ±$acc m" else "Ubicación aproximada"
+            }
         }
-        val kmh = if (l != null && edad <= 5 && l.hasSpeed()) Math.round(l.speed * 3.6f) else 0
+        val kmh = if (l != null && (edad <= 5 || esSintetica(l)) && l.hasSpeed()) Math.round(l.speed * 3.6f) else 0
         tvVelocidad.text = kmh.toString()
         tvGps.text = msg
         (puntoGps.background as? GradientDrawable)?.setColor(color)
@@ -2041,6 +2562,13 @@ class MainActivity : Activity(), LocationListener {
         sb.append("Inicio: pantalla ${t(tCreate)} · motor ${t(tMapReady)} · estilo ${t(tStyle)} · mapa completo ${t(tIdle)}\n")
         sb.append("FPS: $fps  |  Memoria de la app: ${mi.totalPss / 1024} MB (java $javaMb, nativa $nativaMb)\n")
         sb.append("RAM libre: ${sis.availMem / 1048576} MB de ${sis.totalMem / 1048576} MB\n")
+        sb.append("Ubicación: permiso ${permisoTexto()}  |  ${proveedoresTexto()}\n")
+        sb.append("Posiciones recibidas: ")
+            .append(if (contFix.isEmpty()) "ninguna" else contFix.entries.joinToString("  ") { "${it.key} ${it.value}" })
+            .append('\n')
+        sb.append("Rutas: ")
+            .append(if (grafo != null) "motor listo" else if (cargandoGrafo) "preparando…" else if (errorGrafo.isNotEmpty()) errorGrafo else "no listo")
+            .append('\n')
         sb.append(lineaGps)
         if (errorMapa.isNotEmpty()) sb.append("\nERROR: ").append(errorMapa)
         d.text = sb.toString()

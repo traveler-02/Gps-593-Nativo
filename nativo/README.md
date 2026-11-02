@@ -1,4 +1,4 @@
-# GPS 593 nativo — prototipo 0.5 (mapa, búsqueda y ajustes)
+# GPS 593 nativo — prototipo 0.6 (mapa, búsqueda, ajustes y navegación)
 
 App Android **nativa** (Kotlin, sin AppCompat ni Compose) que dibuja `ecuador.pmtiles` con MapLibre Native
 (OpenGL ES) y muestra tu posición GPS, con un **panel de diagnóstico** para medir en la radio.
@@ -20,8 +20,8 @@ La nativa es `ec.gps593.nativo` y se llama "GPS 593 nativo" (mismo logo). Para n
 (o ejecuta una vez `gradle wrapper --gradle-version 8.9`).
 
 ## Cómo saber que abriste la app NATIVA (y no la web anterior)
-- Al abrir: pantalla con el logo y "Versión nativa 0.5"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
-- Ajustes › Acerca de muestra "Versión nativa 0.5" y el diagnóstico. La app web anterior dice "WebView Chrome".
+- Al abrir: pantalla con el logo y "Versión nativa 0.6"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
+- Ajustes › Acerca de muestra "Versión nativa 0.6" y el diagnóstico. La app web anterior dice "WebView Chrome".
 
 ## Instalar los archivos (una sola vez)
 La primera vez aparece la tarjeta **"Instala el mapa de Ecuador"**; también está en **Ajustes › Mapas**.
@@ -32,13 +32,21 @@ Al instalar el `.g593` se prepara el índice de búsqueda (una sola vez, algunos
 
 ## Pantalla
 - Arriba: velocidad y estado del GPS, y la barra de búsqueda.
-- Abajo izquierda: ☾/☀ día-noche y ⚙ ajustes. Abajo derecha: ＋ －  y centrar (verde-azul = siguiendo tu posición).
+- Abajo izquierda: ☾/☀ día-noche y ⚙ ajustes. Abajo derecha: ＋ －  y centrar.
 - **Búsqueda**: lugares, barrios y calles sin internet (con el `.g593`); si no hay resultados, prueba con internet (Photon, solo demo).
-  Al elegir un resultado: marcador rojo, tarjeta con el nombre y ☆ para guardarlo en favoritos.
-  "Cómo llegar" aún no navega (llega con el siguiente paso).
-- **Ajustes**: pestañas *Mapas* (archivos y estado), *Lugares* (favoritos y rutas guardadas), *Preferencias*
-  (modo automático/día/noche, pantalla encendida, voz con botón "Probar voz") y *Acerca de* (versión y diagnóstico).
-- **Ubicación**: usa GPS y también la red (aproximada) para localizarte rápido en interiores.
+- **Mantén pulsado el mapa** para elegir cualquier punto como destino.
+- **Ajustes**: *Mapas*, *Lugares* (favoritos), *Preferencias* (modo, pantalla, mapa 3D, voz) y *Acerca de* (diagnóstico).
+
+## Navegación
+1. Busca un lugar (o mantén pulsado el mapa) → **Cómo llegar** calcula la ruta sin internet y la dibuja con distancia, tiempo y hora de llegada.
+2. **Iniciar**: el mapa te sigue y gira hacia donde avanzas; arriba ves la próxima maniobra y abajo la hora de llegada.
+   La voz avisa a unos 400, 150 y 40 metros ("En 150 metros, gira a la derecha hacia…"). Si te sales de la ruta, recalcula sola.
+3. **Simular** recorre la ruta a ~50 km/h para probar la voz y las instrucciones sin salir a la calle.
+4. **Estoy aquí** (en la tarjeta de un lugar) fija una posición de prueba: sirve en interiores o para calcular rutas desde cualquier punto.
+
+## Si el GPS no localiza
+Ajustes › Acerca de muestra el permiso, los proveedores (GPS, red, fusionado) y cuántas posiciones llegaron de cada uno.
+El GPS necesita cielo abierto; en interiores usa la ubicación aproximada de la red o la posición de prueba.
 
 ## Qué mirar en el panel ⓘ (y qué anotar)
 - `Desde el inicio`: pantalla / motor / estilo / **mapa completo** (ms desde que Android crea la app).
@@ -53,11 +61,11 @@ Al instalar el `.g593` se prepara el índice de búsqueda (una sola vez, algunos
 - No encuentra el pendrive: acepta el permiso de almacenamiento y revisa que el archivo termine en `.pmtiles`.
 
 ## Estructura
-- `app/src/main/java/ec/gps593/nativo/MainActivity.kt` — interfaz y lógica; `Indice.kt` — índice de búsqueda sin internet.
+- `app/src/main/java/ec/gps593/nativo/MainActivity.kt` — interfaz y lógica; `Indice.kt` — índice de búsqueda; `Rutas.kt` — motor de rutas (A*) sobre el `.g593` mapeado en memoria.
 - `tools/fetch_icons.py` — regenera los íconos (Material Symbols, Apache 2.0) en `res/drawable`.
 - `app/src/main/assets/style-day.json | style-night.json` — estilos ligeros (43 capas, sin íconos ni edificios).
   Se regeneran con `npm i @protomaps/basemaps && node tools/make_style.mjs` (las paletas están en ese script).
 - `app/src/main/assets/glyphs/` — fuentes del mapa (Noto Sans) para funcionar sin internet.
 
 ## Próximos pasos
-Rutas (A* sobre `ecuador.g593` mapeado en memoria, sin paso de "cargando") → navegación giro a giro con voz.
+Rutas en línea de respaldo, rotonda/salidas en las instrucciones, límites de velocidad y reportes.

@@ -1,6 +1,7 @@
 package ec.gps593.nativo
 
 import android.util.JsonReader
+import android.util.JsonToken
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -175,13 +176,27 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
             val normOff = IntVec()
             val disp = ByteArrayOutputStream(1 shl 20)
             val norm = ByteArrayOutputStream(1 shl 20)
+            val nOff = IntVec()
+            val nb = ByteArrayOutputStream(1 shl 20)
 
             FileInputStream(g593).use { fis ->
                 fis.channel.position(longitud - jl)
                 JsonReader(InputStreamReader(BufferedInputStream(fis, 1 shl 16), Charsets.UTF_8)).use { r ->
                     r.beginObject()
                     while (r.hasNext()) {
-                        if (r.nextName() == "places") {
+                        val clave = r.nextName()
+                        if (clave == "names") {
+                            r.beginArray()
+                            while (r.hasNext()) {
+                                nOff.add(nb.size())
+                                if (r.peek() == JsonToken.NULL) {
+                                    r.nextNull()
+                                } else {
+                                    nb.write(r.nextString().toByteArray(Charsets.UTF_8))
+                                }
+                            }
+                            r.endArray()
+                        } else if (clave == "places") {
                             r.beginArray()
                             while (r.hasNext()) {
                                 r.beginArray()
@@ -230,11 +245,49 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
             out.put(dBytes)
             out.put(nBytes)
 
+            // Nombres de calles (los usa el motor de rutas para las instrucciones)
+            nOff.add(nb.size())
+            val cn = nOff.n - 1
+            val cBytes = nb.toByteArray()
+            val cOut = ByteBuffer.allocate(8 + 4 * (cn + 1) + cBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+            cOut.put("N593".toByteArray(Charsets.US_ASCII))
+            cOut.putInt(cn)
+            for (i in 0..cn) cOut.putInt(nOff.a[i])
+            cOut.put(cBytes)
+            val cDestino = File(destino.parentFile, "calles.idx")
+            val cTmp = File(cDestino.path + ".tmp")
+            FileOutputStream(cTmp).use { it.write(cOut.array(), 0, cOut.capacity()) }
+            if (cDestino.exists()) cDestino.delete()
+            if (!cTmp.renameTo(cDestino)) throw IOException("no pude guardar los nombres de calles")
+
             val tmp = File(destino.path + ".tmp")
             FileOutputStream(tmp).use { it.write(out.array(), 0, tam) }
             if (destino.exists()) destino.delete()
             if (!tmp.renameTo(destino)) throw IOException("no pude guardar el índice")
             return n
+        }
+    }
+}
+
+/** Nombres de calles del .g593 (archivo calles.idx), consultables por número. */
+class Calles private constructor(private val bytes: ByteArray) {
+    private val bb: ByteBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val n: Int = bb.getInt(4)
+    private val base = 8 + 4 * (n + 1)
+
+    fun nombre(i: Int): String {
+        if (i < 0 || i >= n) return ""
+        val o0 = bb.getInt(8 + 4 * i)
+        val o1 = bb.getInt(8 + 4 * (i + 1))
+        return String(bytes, base + o0, o1 - o0, Charsets.UTF_8)
+    }
+
+    companion object {
+        fun cargar(f: File): Calles? {
+            if (!f.exists()) return null
+            val b = f.readBytes()
+            if (b.size < 8 || String(b, 0, 4, Charsets.US_ASCII) != "N593") return null
+            return Calles(b)
         }
     }
 }
