@@ -47,14 +47,14 @@ class Paso(
     }
 
     fun texto(): String = when (tipo) {
-        "depart" -> "Inicia la ruta" + (if (nombre.isNotEmpty()) " por $nombre" else "")
-        "arrive" -> "Has llegado a tu destino"
+        "depart" -> "Inicie la ruta" + (if (nombre.isNotEmpty()) " por $nombre" else "")
+        "arrive" -> "Ha llegado a su destino"
         "new name", "continue" ->
-            "Continúa" + (if (mod.isNotEmpty() && mod != "straight") dir() else " recto") +
+            "Continúe" + (if (mod.isNotEmpty() && mod != "straight") dir() else " recto") +
                 (if (nombre.isNotEmpty()) " por $nombre" else "")
         else ->
-            if (mod == "uturn") "Haz un giro en U" + via()
-            else "Gira" + (if (dir().isNotEmpty()) dir() else " recto") + via()
+            if (mod == "uturn") "Haga un giro en U" + via()
+            else "Gire" + (if (dir().isNotEmpty()) dir() else " recto") + via()
     }
 
     fun icono(): Int = when (tipo) {

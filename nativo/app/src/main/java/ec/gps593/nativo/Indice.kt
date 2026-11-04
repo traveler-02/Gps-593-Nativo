@@ -20,7 +20,7 @@ import java.text.Normalizer
 import java.util.Locale
 
 /** Un lugar encontrado (población, calle, servicio…). */
-class Resultado(val nombre: String, val lat: Double, val lon: Double, val tipo: Int) {
+class Resultado(val nombre: String, val lat: Double, val lon: Double, val tipo: Int, val detalle: String = "") {
     fun tipoTexto(): String = when (tipo) {
         0 -> "Ciudad"
         1 -> "Pueblo"

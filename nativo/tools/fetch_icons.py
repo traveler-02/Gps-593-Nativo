@@ -19,6 +19,7 @@ ICONOS = [
     ('u_turn_left', 'u_turn_left', 0), ('turn_slight_left', 'turn_slight_left', 0),
     ('turn_slight_right', 'turn_slight_right', 0), ('turn_sharp_left', 'turn_sharp_left', 0),
     ('turn_sharp_right', 'turn_sharp_right', 0), ('flag', 'flag', 1),
+    ('edit', 'edit', 0), ('home', 'home', 1), ('work', 'work', 1),
 ]
 out = pathlib.Path('app/src/main/res/drawable'); out.mkdir(parents=True, exist_ok=True)
 fallos = []

@@ -1,4 +1,4 @@
-# GPS 593 nativo — prototipo 0.6 (mapa, búsqueda, ajustes y navegación)
+# GPS 593 nativo — prototipo 0.7 (mapa, búsqueda, navegación, lugares guardados y descarga de mapas)
 
 App Android **nativa** (Kotlin, sin AppCompat ni Compose) que dibuja `ecuador.pmtiles` con MapLibre Native
 (OpenGL ES) y muestra tu posición GPS, con un **panel de diagnóstico** para medir en la radio.
@@ -20,8 +20,8 @@ La nativa es `ec.gps593.nativo` y se llama "GPS 593 nativo" (mismo logo). Para n
 (o ejecuta una vez `gradle wrapper --gradle-version 8.9`).
 
 ## Cómo saber que abriste la app NATIVA (y no la web anterior)
-- Al abrir: pantalla con el logo y "Versión nativa 0.6"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
-- Ajustes › Acerca de muestra "Versión nativa 0.6" y el diagnóstico. La app web anterior dice "WebView Chrome".
+- Al abrir: pantalla con el logo y "Versión nativa 0.7"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
+- Ajustes › Acerca de muestra "Versión nativa 0.7" y el diagnóstico. La app web anterior dice "WebView Chrome".
 
 ## Instalar los archivos (una sola vez)
 La primera vez aparece la tarjeta **"Instala el mapa de Ecuador"**; también está en **Ajustes › Mapas**.
@@ -36,6 +36,18 @@ Al instalar el `.g593` se prepara el índice de búsqueda (una sola vez, algunos
 - **Búsqueda**: lugares, barrios y calles sin internet (con el `.g593`); si no hay resultados, prueba con internet (Photon, solo demo).
 - **Mantén pulsado el mapa** para elegir cualquier punto como destino.
 - **Ajustes**: *Mapas*, *Lugares* (favoritos), *Preferencias* (modo, pantalla, mapa 3D, voz) y *Acerca de* (diagnóstico).
+
+## Lugares guardados
+- **Casa y trabajo**: en la búsqueda (al abrirla) y en Ajustes › Lugares. Toca "Casa" o "Trabajo" para ir; si no están definidos, "Toca para definir" abre la búsqueda y el lugar que elijas queda guardado (también con "Mi ubicación actual" o manteniendo pulsado el mapa).
+- **Favoritos con nombre**: toca ☆ en la tarjeta de un lugar → eliges *Favorito, Casa o Trabajo* y le pones nombre. Se pueden renombrar (✎) o quitar en Ajustes › Lugares.
+- Escribir "casa", "trabajo" o el nombre de un favorito en la búsqueda los muestra primero.
+
+## Voz
+La voz usa el motor de texto a voz de Android en **español**. En Ajustes › Preferencias › Voz puedes: *Probar voz*, cambiar la velocidad (lenta/normal/rápida), elegir entre las voces en español instaladas y abrir los *ajustes de voz del sistema* para instalar una voz mejor.
+
+## Descargar los mapas desde internet
+Para publicar la app, los usuarios descargan los mapas dentro de la app. Lee **DISTRIBUCION.md** (recomendación, costos y pasos).
+Se activa poniendo la URL del `manifest.json` en `Config.kt` (`MANIFIESTO_URL`).
 
 ## Navegación
 1. Busca un lugar (o mantén pulsado el mapa) → **Cómo llegar** calcula la ruta sin internet y la dibuja con distancia, tiempo y hora de llegada.
@@ -61,7 +73,9 @@ El GPS necesita cielo abierto; en interiores usa la ubicación aproximada de la 
 - No encuentra el pendrive: acepta el permiso de almacenamiento y revisa que el archivo termine en `.pmtiles`.
 
 ## Estructura
+- `app/src/main/java/ec/gps593/nativo/Config.kt` — creador, propietario y URL del manifiesto; `Descarga.kt` — descarga con reanudación y SHA-256.
 - `app/src/main/java/ec/gps593/nativo/MainActivity.kt` — interfaz y lógica; `Indice.kt` — índice de búsqueda; `Rutas.kt` — motor de rutas (A*) sobre el `.g593` mapeado en memoria.
+- `tools/make_manifest.py` — genera el `manifest.json` de la descarga.
 - `tools/fetch_icons.py` — regenera los íconos (Material Symbols, Apache 2.0) en `res/drawable`.
 - `app/src/main/assets/style-day.json | style-night.json` — estilos ligeros (43 capas, sin íconos ni edificios).
   Se regeneran con `npm i @protomaps/basemaps && node tools/make_style.mjs` (las paletas están en ese script).

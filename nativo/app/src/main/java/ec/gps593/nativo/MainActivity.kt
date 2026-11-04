@@ -19,6 +19,8 @@ import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioAttributes
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +32,7 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.speech.tts.Voice
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
@@ -68,7 +71,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.6"
+private const val VERSION = "0.7"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
@@ -151,6 +154,21 @@ class MainActivity : Activity(), LocationListener {
     private var tBusquedaGps = 0L
     private val contFix = HashMap<String, Int>()
 
+    // Descarga de mapas
+    private var manifiesto: Descarga.Manifiesto? = null
+    @Volatile private var bajando = false
+    @Volatile private var cancelarBajada = false
+    private var consultandoManifiesto = false
+    private var errorManifiesto = ""
+
+    // Casa / trabajo (null = no se está definiendo ninguno)
+    private var definiendo: String? = null
+
+    // Voz
+    private var velVoz = 0.95f
+    private var vozNombre = ""
+    private var vocesEs: List<Voice> = emptyList()
+
     private val frames = AtomicInteger(0)
     @Volatile private var fps = 0
     private var errorMapa = ""
@@ -183,6 +201,16 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var tvNavResto: TextView
     private lateinit var btnPrimario: TextView
     private lateinit var btnSimular: TextView
+    private lateinit var btnDescargar: TextView
+    private lateinit var btnCancelarBajada: TextView
+    private lateinit var panelDialogo: FrameLayout
+    private lateinit var cardDlg: LinearLayout
+    private lateinit var tvDlgTitulo: TextView
+    private lateinit var tvDlgTexto: TextView
+    private lateinit var etDlg: EditText
+    private lateinit var filaDlgChips: LinearLayout
+    private lateinit var btnDlgOk: TextView
+    private lateinit var btnDlgCancel: TextView
 
     // Tarjeta de instalación inicial / progreso
     private lateinit var tarjetaMapa: LinearLayout
@@ -279,6 +307,8 @@ class MainActivity : Activity(), LocationListener {
         pantallaOn = prefs.getBoolean("pantalla", true)
         vozOn = prefs.getBoolean("voz", true)
         inclinado = prefs.getBoolean("inclinado", memoriaTotalMb() >= 3500L)
+        velVoz = prefs.getFloat("voz_vel", 0.95f)
+        vozNombre = prefs.getString("voz_nombre", "") ?: ""
         night = calcularNoche()
         if (pantallaOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -356,6 +386,7 @@ class MainActivity : Activity(), LocationListener {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         when {
+            panelDialogo.visibility == View.VISIBLE -> cerrarDialogo()
             panelBusqueda.visibility == View.VISIBLE -> cerrarBusqueda()
             panelAjustes.visibility == View.VISIBLE -> cerrarAjustes()
             tarjetaLugar.visibility == View.VISIBLE -> ocultarLugar()
@@ -710,6 +741,7 @@ class MainActivity : Activity(), LocationListener {
         crearTarjetaMapa()
         crearPanelBusqueda()
         crearPanelAjustes()
+        crearPanelDialogo()
         crearSplash()
     }
 
@@ -809,19 +841,153 @@ class MainActivity : Activity(), LocationListener {
             setPadding(0, dp(8), 0, 0)
             visibility = View.GONE
         }
-        filaBotonesMapa = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        filaBotonesMapa.addView(
-            botonTexto("Elegir archivos", true) { elegirArchivos() },
+        val conDescarga = Config.MANIFIESTO_URL.isNotEmpty()
+        filaBotonesMapa = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        btnDescargar = botonTexto("Descargar mapas", true) { descargarMapas() }
+        btnDescargar.visibility = if (conDescarga) View.VISIBLE else View.GONE
+        filaBotonesMapa.addView(btnDescargar, LinearLayout.LayoutParams(wc, wc).apply { bottomMargin = dp(10) })
+        val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fila2.addView(
+            botonTexto("Elegir archivos", !conDescarga) { elegirArchivos() },
             LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(10) }
         )
-        filaBotonesMapa.addView(botonTexto("Buscar en el pendrive", false) { buscarEnPendrive() })
+        fila2.addView(botonTexto("Buscar en el pendrive", false) { buscarEnPendrive() })
+        filaBotonesMapa.addView(fila2)
+        btnCancelarBajada = botonTexto("Cancelar descarga", false) {
+            cancelarBajada = true
+            aviso("Cancelando…")
+        }
+        btnCancelarBajada.visibility = View.GONE
         tarjetaMapa.addView(tvMapaTitulo)
         tarjetaMapa.addView(tvMapaTexto)
         tarjetaMapa.addView(tvMapaError)
         tarjetaMapa.addView(barraCopia, LinearLayout.LayoutParams(mw, dp(8)).apply { topMargin = dp(16) })
         tarjetaMapa.addView(tvPct)
+        tarjetaMapa.addView(btnCancelarBajada, LinearLayout.LayoutParams(wc, wc).apply { topMargin = dp(14) })
         tarjetaMapa.addView(filaBotonesMapa, LinearLayout.LayoutParams(wc, wc).apply { topMargin = dp(18) })
         raiz.addView(tarjetaMapa, FrameLayout.LayoutParams(dp(560), wc, Gravity.CENTER))
+    }
+
+    // ───────────────────────── diálogo propio (guardar, renombrar, confirmar) ─────────────────────────
+
+    private fun crearPanelDialogo() {
+        val mw = ViewGroup.LayoutParams.MATCH_PARENT
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+        panelDialogo = FrameLayout(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(Color.parseColor("#99000000"))
+            isClickable = true
+            setOnClickListener { cerrarDialogo() }
+        }
+        cardDlg = tarjeta(28).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(22), dp(24), dp(18))
+            isClickable = true
+        }
+        tvDlgTitulo = texto(20f, "sans-serif-medium")
+        tvDlgTexto = texto(14f).apply {
+            setPadding(0, dp(8), 0, 0)
+            setLineSpacing(0f, 1.15f)
+        }
+        filaDlgChips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(14), 0, 0)
+        }
+        etDlg = EditText(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f * escala)
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setOnEditorActionListener { _, _, _ ->
+                btnDlgOk.performClick()
+                true
+            }
+        }
+        val filaBtns = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        btnDlgCancel = botonTexto("Cancelar", false) { cerrarDialogo() }
+        btnDlgOk = botonTexto("Guardar", true) {
+            val t = etDlg.text.toString().trim()
+            val cb = dlgOk
+            val cat = dlgCat
+            cerrarDialogo()
+            cb?.invoke(t, cat)
+        }
+        filaBtns.addView(btnDlgCancel, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(10) })
+        filaBtns.addView(btnDlgOk)
+        cardDlg.addView(tvDlgTitulo)
+        cardDlg.addView(tvDlgTexto)
+        cardDlg.addView(filaDlgChips)
+        cardDlg.addView(etDlg, LinearLayout.LayoutParams(mw, wc).apply { topMargin = dp(14) })
+        cardDlg.addView(filaBtns, LinearLayout.LayoutParams(mw, wc).apply { topMargin = dp(18) })
+        panelDialogo.addView(cardDlg, FrameLayout.LayoutParams(dp(520), wc, Gravity.CENTER))
+        raiz.addView(panelDialogo, FrameLayout.LayoutParams(mw, mw))
+    }
+
+    private var dlgOk: ((String, Int) -> Unit)? = null
+    private var dlgCat = 0
+    private var dlgCats: List<String>? = null
+    private var dlgCampoSoloFav = false
+    private var dlgTieneCampo = false
+
+    private fun actualizarDialogo() {
+        filaDlgChips.removeAllViews()
+        val cats = dlgCats
+        if (cats == null) {
+            filaDlgChips.visibility = View.GONE
+        } else {
+            filaDlgChips.visibility = View.VISIBLE
+            for (i in cats.indices) {
+                filaDlgChips.addView(
+                    chip(cats[i], i == dlgCat) {
+                        dlgCat = i
+                        actualizarDialogo()
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = dp(8)
+                    }
+                )
+            }
+        }
+        etDlg.visibility = if (!dlgTieneCampo || (dlgCampoSoloFav && dlgCat != 0)) View.GONE else View.VISIBLE
+    }
+
+    /** Muestra un diálogo con título, texto, campo opcional y categorías opcionales. */
+    private fun mostrarDialogo(
+        titulo: String, texto: String, campo: String?, categorias: List<String>?,
+        textoOk: String, campoSoloFav: Boolean = false, ok: (String, Int) -> Unit
+    ) {
+        tvDlgTitulo.text = titulo
+        tvDlgTexto.text = texto
+        tvDlgTexto.visibility = if (texto.isEmpty()) View.GONE else View.VISIBLE
+        dlgCats = categorias
+        dlgCat = 0
+        dlgCampoSoloFav = campoSoloFav
+        dlgTieneCampo = campo != null
+        etDlg.setText(campo ?: "")
+        etDlg.setSelection(etDlg.text.length)
+        btnDlgOk.text = textoOk
+        dlgOk = ok
+        actualizarDialogo()
+        panelDialogo.visibility = View.VISIBLE
+        panelDialogo.alpha = 0f
+        panelDialogo.animate().alpha(1f).setDuration(140L).start()
+        if (campo != null) {
+            etDlg.requestFocus()
+            ui.postDelayed({
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(etDlg, InputMethodManager.SHOW_IMPLICIT)
+            }, 150L)
+        }
+    }
+
+    private fun cerrarDialogo() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(etDlg.windowToken, 0)
+        panelDialogo.animate().alpha(0f).setDuration(120L).withEndAction { panelDialogo.visibility = View.GONE }.start()
     }
 
     private fun crearPanelBusqueda() {
@@ -979,6 +1145,8 @@ class MainActivity : Activity(), LocationListener {
         val anchoInf = if (w < dp(760)) w - dp(28) else Math.min(dp(520), w - dp(180))
         (tarjetaLugar.layoutParams as FrameLayout.LayoutParams).width = anchoInf
         (barraNav.layoutParams as FrameLayout.LayoutParams).width = anchoInf
+        (cardDlg.layoutParams as FrameLayout.LayoutParams).width = Math.min(dp(520), w - dp(28))
+        cardDlg.requestLayout()
         barraNav.requestLayout()
         tarjetaMapa.requestLayout()
         hojaAjustes.requestLayout()
@@ -1058,6 +1226,15 @@ class MainActivity : Activity(), LocationListener {
         tvNavResto.setTextColor(pal.sub)
         etBusqueda.setTextColor(pal.texto)
         etBusqueda.setHintTextColor(pal.sub)
+        etDlg.setTextColor(pal.texto)
+        etDlg.setHintTextColor(pal.sub)
+        etDlg.background = GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setColor(pal.fondoClaro)
+            setStroke(dp(1), pal.borde)
+        }
+        tvDlgTitulo.setTextColor(pal.texto)
+        tvDlgTexto.setTextColor(pal.sub)
         splash.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(pal.pantalla, pal.pantalla2))
         splashTitulo.setTextColor(pal.texto)
         splashSub.setTextColor(pal.sub)
@@ -1410,27 +1587,157 @@ class MainActivity : Activity(), LocationListener {
                     errores.add(e.message ?: "error desconocido")
                 }
             }
-            ui.post {
-                instalando = false
-                progreso = 1f
-                errorInstal = if (errores.isEmpty()) "" else "No pude instalar: " + errores.joinToString("; ")
-                val m = File(carpeta, "ecuador.pmtiles")
-                val r = File(carpeta, "ecuador.g593")
-                mapPath = if (m.exists() && m.length() > 1000L) m.absolutePath else null
-                rutasPath = if (r.exists() && r.length() > 1000L) r.absolutePath else null
-                if (nuevoMapa) cargarEstilo()
-                if (nuevasRutas) {
-                    indice = null
-                    grafo = null
-                    calles = null
-                    errorGrafo = ""
-                    prepararIndice()
+            ui.post { finalizarInstalacion(errores, nuevoMapa, nuevasRutas) }
+        }.start()
+    }
+
+    // ───────────────────────── descargar mapas desde internet ─────────────────────────
+
+    private fun consultarManifiesto() {
+        if (Config.MANIFIESTO_URL.isEmpty() || consultandoManifiesto) return
+        consultandoManifiesto = true
+        errorManifiesto = ""
+        Thread {
+            try {
+                val m = Descarga.leerManifiesto(Config.MANIFIESTO_URL)
+                ui.post {
+                    manifiesto = m
+                    consultandoManifiesto = false
+                    refrescarAjustes()
                 }
-                if (errores.isEmpty() && (nuevoMapa || nuevasRutas)) aviso("Listo: los archivos quedaron instalados.")
-                actualizarTarjetas()
-                refrescarAjustes()
+            } catch (e: Exception) {
+                ui.post {
+                    consultandoManifiesto = false
+                    errorManifiesto = "No pude consultar la versión de los mapas (¿sin internet?)"
+                    refrescarAjustes()
+                }
             }
         }.start()
+    }
+
+    private fun versionInstalada(): String = prefs.getString("ver_mapas", "") ?: ""
+
+    private fun hayActualizacion(): Boolean {
+        val m = manifiesto ?: return false
+        return m.version.isNotEmpty() && m.version != versionInstalada()
+    }
+
+    private fun descargarMapas() {
+        if (Config.MANIFIESTO_URL.isEmpty() || instalando) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val conectado = try { cm.activeNetworkInfo?.isConnected == true } catch (e: Exception) { true }
+        if (!conectado) {
+            aviso("No hay conexión a internet.")
+            return
+        }
+        val medido = try { cm.isActiveNetworkMetered } catch (e: Exception) { false }
+        val mb = (manifiesto?.totalBytes() ?: 0L) / 1048576
+        if (medido) {
+            mostrarDialogo(
+                "Descargar con datos móviles",
+                "Se descargarán " + (if (mb > 0L) "unos $mb MB" else "los mapas") + ". Se recomienda usar Wi‑Fi.",
+                null, null, "Descargar"
+            ) { _, _ -> iniciarDescarga() }
+        } else {
+            iniciarDescarga()
+        }
+    }
+
+    private fun iniciarDescarga() {
+        if (instalando) return
+        instalando = true
+        bajando = true
+        cancelarBajada = false
+        progreso = 0f
+        textoInstal = "Buscando la última versión…"
+        errorInstal = ""
+        actualizarTarjetas()
+        refrescarAjustes()
+        val carpeta = carpetaApp()
+        Thread {
+            val errores = ArrayList<String>()
+            var nuevoMapa = false
+            var nuevasRutas = false
+            var versionNueva = ""
+            try {
+                val man = manifiesto ?: Descarga.leerManifiesto(Config.MANIFIESTO_URL)
+                versionNueva = man.version
+                val totalGeneral = man.totalBytes()
+                var antes = 0L
+                for ((k, a) in man.archivos.withIndex()) {
+                    val etiqueta = if (a.nombre.endsWith(".pmtiles", true)) "el mapa" else "las rutas y la búsqueda"
+                    textoInstal = "Descargando $etiqueta (${k + 1} de ${man.archivos.size})…"
+                    val parte = File(carpeta, a.nombre + ".part")
+                    if (a.bytes > 0L && StatFs(carpeta.path).availableBytes < a.bytes - parte.length() + 50_000_000L) {
+                        throw RuntimeException("no hay espacio libre suficiente")
+                    }
+                    var ultimo = 0L
+                    Descarga.bajar(a, parte, { cancelarBajada }) { hecho, total ->
+                        progreso = if (totalGeneral > 0L) (antes + hecho).toFloat() / totalGeneral.toFloat()
+                        else if (total > 0L) hecho.toFloat() / total.toFloat() else 0f
+                        val ahora = SystemClock.elapsedRealtime()
+                        if (ahora - ultimo > 250L) {
+                            ultimo = ahora
+                            ui.post { actualizarTarjetas() }
+                        }
+                    }
+                    antes += a.bytes
+                    // Reconocer el tipo por la cabecera antes de instalarlo
+                    val cab = ByteArray(8)
+                    val leidos = FileInputStream(parte).use { it.read(cab) }
+                    val tipo = when {
+                        leidos >= 7 && String(cab, 0, 7, Charsets.US_ASCII) == "PMTiles" -> 0
+                        leidos >= 4 && String(cab, 0, 4, Charsets.US_ASCII) == "G593" -> 1
+                        else -> -1
+                    }
+                    if (tipo < 0) {
+                        parte.delete()
+                        throw RuntimeException("«${a.nombre}» no es un archivo de mapa válido")
+                    }
+                    val destinoArchivo = File(carpeta, if (tipo == 0) "ecuador.pmtiles" else "ecuador.g593")
+                    if (destinoArchivo.exists()) destinoArchivo.delete()
+                    if (!parte.renameTo(destinoArchivo)) throw RuntimeException("no pude guardar «${a.nombre}»")
+                    if (tipo == 0) {
+                        nuevoMapa = true
+                    } else {
+                        nuevasRutas = true
+                        File(carpeta, "lugares.idx").delete()
+                    }
+                }
+            } catch (e: Descarga.Cancelada) {
+                errores.add("descarga cancelada (si la repites, continúa donde quedó)")
+            } catch (e: Exception) {
+                errores.add(e.message ?: "error desconocido")
+            }
+            ui.post {
+                bajando = false
+                if (errores.isEmpty() && versionNueva.isNotEmpty()) prefs.edit().putString("ver_mapas", versionNueva).apply()
+                finalizarInstalacion(errores, nuevoMapa, nuevasRutas)
+            }
+        }.start()
+    }
+
+    /** Se ejecuta en el hilo principal al terminar de instalar (copia o descarga) uno o más archivos. */
+    private fun finalizarInstalacion(errores: List<String>, nuevoMapa: Boolean, nuevasRutas: Boolean) {
+        val carpeta = carpetaApp()
+        instalando = false
+        progreso = 1f
+        errorInstal = if (errores.isEmpty()) "" else "No pude instalar: " + errores.joinToString("; ")
+        val m = File(carpeta, "ecuador.pmtiles")
+        val r = File(carpeta, "ecuador.g593")
+        mapPath = if (m.exists() && m.length() > 1000L) m.absolutePath else null
+        rutasPath = if (r.exists() && r.length() > 1000L) r.absolutePath else null
+        if (nuevoMapa) cargarEstilo()
+        if (nuevasRutas) {
+            indice = null
+            grafo = null
+            calles = null
+            errorGrafo = ""
+            prepararIndice()
+        }
+        if (errores.isEmpty() && (nuevoMapa || nuevasRutas)) aviso("Listo: los archivos quedaron instalados.")
+        actualizarTarjetas()
+        refrescarAjustes()
     }
 
     /** Construye (la primera vez) y carga el índice de búsqueda sin internet. */
@@ -1498,14 +1805,19 @@ class MainActivity : Activity(), LocationListener {
                 tvPct.text = textoInstal + (if (progreso > 0f) "  ${(progreso * 100).toInt()} %" else "")
                 tvPct.visibility = View.VISIBLE
                 filaBotonesMapa.visibility = View.GONE
+                btnCancelarBajada.visibility = if (bajando) View.VISIBLE else View.GONE
                 tvMapaError.visibility = View.GONE
             } else {
                 tvMapaTitulo.text = "Instala el mapa de Ecuador"
-                tvMapaTexto.text = "Elige los archivos ecuador.pmtiles (mapa) y ecuador.g593 (rutas y búsqueda). " +
+                tvMapaTexto.text = if (Config.MANIFIESTO_URL.isNotEmpty())
+                    "Descarga el mapa y las rutas de Ecuador (se hace una sola vez; después funciona sin internet). " +
+                        "También puedes elegir los archivos ecuador.pmtiles y ecuador.g593 si ya los tienes."
+                else "Elige los archivos ecuador.pmtiles (mapa) y ecuador.g593 (rutas y búsqueda). " +
                     "Puedes escoger los dos a la vez; la app los reconoce sola."
                 barraCopia.visibility = View.GONE
                 tvPct.visibility = View.GONE
                 filaBotonesMapa.visibility = View.VISIBLE
+                btnCancelarBajada.visibility = View.GONE
                 if (errorInstal.isNotEmpty()) {
                     tvMapaError.text = errorInstal
                     tvMapaError.visibility = View.VISIBLE
@@ -1546,7 +1858,9 @@ class MainActivity : Activity(), LocationListener {
                 } catch (e: Throwable) {
                     origen = "error"
                 }
-                ui.post { if (id == busquedaId) mostrarResultados(res, q, origen) }
+                val guardados = coincidenciasGuardadas(q)
+                val todos = guardados + res.filter { r -> guardados.none { g -> mismoLugar(g, r) } }
+                ui.post { if (id == busquedaId) mostrarResultados(todos, q, origen) }
             }.start()
         }
     }
@@ -1556,6 +1870,8 @@ class MainActivity : Activity(), LocationListener {
         panelBusqueda.visibility = View.VISIBLE
         panelBusqueda.alpha = 0f
         panelBusqueda.animate().alpha(1f).setDuration(160L).start()
+        val dfn = definiendo
+        etBusqueda.hint = if (dfn != null) "Dirección de tu ${etiquetaLugar(dfn).lowercase(Locale.ROOT)}" else "Busca un lugar, barrio o calle"
         etBusqueda.setText("")
         mostrarResultados(emptyList(), "", "")
         actualizarTarjetas()
@@ -1567,6 +1883,7 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun cerrarBusqueda() {
+        definiendo = null
         ocultarTeclado()
         panelBusqueda.animate().alpha(0f).setDuration(140L).withEndAction {
             panelBusqueda.visibility = View.GONE
@@ -1581,6 +1898,7 @@ class MainActivity : Activity(), LocationListener {
         val pal = paleta()
         listaResultados.removeAllViews()
         if (res.isEmpty()) {
+            if (q.length < 2) agregarAtajos(pal)
             val msg = when {
                 q.length < 2 && indice != null ->
                     "Escribe un lugar, barrio o calle.\nBúsqueda sin internet lista · ${indice?.total ?: 0} lugares."
@@ -1606,7 +1924,11 @@ class MainActivity : Activity(), LocationListener {
                 isClickable = true
                 setOnClickListener { seleccionarResultado(r) }
             }
-            val ico = icono(R.drawable.ic_place, 26, pal.acento)
+            val guardado = r.detalle.isNotEmpty()
+            val icRes = if (guardado && r.nombre == "Casa") R.drawable.ic_home
+            else if (guardado && r.nombre == "Trabajo") R.drawable.ic_work
+            else if (guardado) R.drawable.ic_star_fill else R.drawable.ic_place
+            val ico = icono(icRes, 26, if (guardado && icRes == R.drawable.ic_star_fill) Color.parseColor("#F59E0B") else pal.acento)
             (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
             fila.addView(ico)
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1616,7 +1938,7 @@ class MainActivity : Activity(), LocationListener {
                 ellipsize = TextUtils.TruncateAt.END
             }
             val sub = txt(12f, "sans-serif", pal.sub).apply {
-                text = r.tipoTexto() + " · " + origen
+                text = if (r.detalle.isNotEmpty()) "Guardado · " + r.detalle else r.tipoTexto() + " · " + origen
                 setPadding(0, dp(2), 0, 0)
             }
             col.addView(nombre)
@@ -1627,6 +1949,15 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun seleccionarResultado(r: Resultado) {
+        val dfn = definiendo
+        if (dfn != null) {
+            // Se está definiendo casa o trabajo: el lugar elegido se guarda
+            definiendo = null
+            guardarLugar(dfn, Resultado(etiquetaLugar(dfn), r.lat, r.lon, r.tipo, if (r.detalle.isNotEmpty()) r.detalle else r.nombre))
+            aviso("${etiquetaLugar(dfn)} guardada: " + (if (r.detalle.isNotEmpty()) r.detalle else r.nombre))
+            if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
+            return
+        }
         if (modoRuta != 0) cancelarRuta()
         if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
         if (panelAjustes.visibility == View.VISIBLE) cerrarAjustes()
@@ -1636,7 +1967,8 @@ class MainActivity : Activity(), LocationListener {
         actualizarBotonCentrar()
         map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(r.lat, r.lon), 15.5))
         tvLugarTitulo.text = r.nombre
-        tvLugarSub.text = r.tipoTexto() + String.format(Locale.US, " · %.5f, %.5f", r.lat, r.lon)
+        tvLugarSub.text = if (r.detalle.isNotEmpty()) r.detalle
+        else r.tipoTexto() + String.format(Locale.US, " · %.5f, %.5f", r.lat, r.lon)
         tarjetaLugar.visibility = View.VISIBLE
         actualizarEstrella()
         ajustarColumnas()
@@ -1657,7 +1989,9 @@ class MainActivity : Activity(), LocationListener {
         estilo?.getSourceAs<GeoJsonSource>("destino")?.setGeoJson(json)
     }
 
-    // ───────────────────────── favoritos ─────────────────────────
+    // ───────────────────────── lugares guardados: favoritos, casa y trabajo ─────────────────────────
+
+    private fun etiquetaLugar(clave: String): String = if (clave == "casa") "Casa" else "Trabajo"
 
     private fun leerFavs(): MutableList<Resultado> {
         val out = ArrayList<Resultado>()
@@ -1665,7 +1999,7 @@ class MainActivity : Activity(), LocationListener {
             val a = JSONArray(prefs.getString("favs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                out.add(Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6)))
+                out.add(Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6), o.optString("d", "")))
             }
         } catch (e: Exception) { /* lista vacía */ }
         return out
@@ -1673,35 +2007,217 @@ class MainActivity : Activity(), LocationListener {
 
     private fun guardarFavs(l: List<Resultado>) {
         val a = JSONArray()
-        for (r in l) a.put(JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo))
+        for (r in l) {
+            a.put(JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo).put("d", r.detalle))
+        }
         prefs.edit().putString("favs", a.toString()).apply()
+    }
+
+    /** Casa o trabajo ("casa" / "trabajo"), o null si no está definido. */
+    private fun leerLugar(clave: String): Resultado? {
+        val s = prefs.getString("lug_$clave", null) ?: return null
+        return try {
+            val o = JSONObject(s)
+            Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6), o.optString("d", ""))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun guardarLugar(clave: String, r: Resultado?) {
+        val e = prefs.edit()
+        if (r == null) {
+            e.remove("lug_$clave")
+        } else {
+            e.putString(
+                "lug_$clave",
+                JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo).put("d", r.detalle).toString()
+            )
+        }
+        e.apply()
     }
 
     private fun mismoLugar(a: Resultado, b: Resultado): Boolean =
         Math.abs(a.lat - b.lat) < 1e-5 && Math.abs(a.lon - b.lon) < 1e-5
 
+    private fun esGuardado(d: Resultado): Boolean {
+        if (leerFavs().any { mismoLugar(it, d) }) return true
+        val casa = leerLugar("casa")
+        if (casa != null && mismoLugar(casa, d)) return true
+        val trabajo = leerLugar("trabajo")
+        return trabajo != null && mismoLugar(trabajo, d)
+    }
+
     private fun actualizarEstrella() {
         val d = destino
-        val fav = d != null && leerFavs().any { mismoLugar(it, d) }
-        btnFav.res = if (fav) R.drawable.ic_star_fill else R.drawable.ic_star_line
-        btnFav.tinte = if (fav) Color.parseColor("#F59E0B") else 0
+        val guardado = d != null && esGuardado(d)
+        btnFav.res = if (guardado) R.drawable.ic_star_fill else R.drawable.ic_star_line
+        btnFav.tinte = if (guardado) Color.parseColor("#F59E0B") else 0
         btnFav.invalidate()
     }
 
+    /** ☆: si el lugar no está guardado abre el diálogo para nombrarlo; si ya lo está, lo quita. */
     private fun alternarFavorito() {
         val d = destino ?: return
-        val l = leerFavs()
-        val ya = l.firstOrNull { mismoLugar(it, d) }
-        if (ya != null) {
-            l.remove(ya)
-            aviso("Quitado de favoritos")
+        if (esGuardado(d)) {
+            val l = leerFavs()
+            l.removeAll { mismoLugar(it, d) }
+            guardarFavs(l)
+            for (clave in arrayOf("casa", "trabajo")) {
+                val p = leerLugar(clave)
+                if (p != null && mismoLugar(p, d)) guardarLugar(clave, null)
+            }
+            aviso("Quitado de tus lugares")
+            actualizarEstrella()
+            if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
         } else {
-            l.add(0, d)
-            aviso("Guardado en favoritos")
+            val base = if (d.detalle.isNotEmpty()) d.detalle else d.nombre
+            mostrarDialogo("Guardar lugar", "", base, listOf("Favorito", "Casa", "Trabajo"), "Guardar", true) { nombre, cat ->
+                guardarComo(d, cat, nombre)
+            }
         }
-        guardarFavs(l)
+    }
+
+    private fun guardarComo(d: Resultado, cat: Int, nombre: String) {
+        val original = if (d.detalle.isNotEmpty()) d.detalle else d.nombre
+        when (cat) {
+            1, 2 -> {
+                val clave = if (cat == 1) "casa" else "trabajo"
+                guardarLugar(clave, Resultado(etiquetaLugar(clave), d.lat, d.lon, d.tipo, original))
+                aviso("Guardado como ${etiquetaLugar(clave)}")
+            }
+            else -> {
+                val l = leerFavs()
+                l.removeAll { mismoLugar(it, d) }
+                val nom = if (nombre.isNotEmpty()) nombre else original
+                l.add(0, Resultado(nom, d.lat, d.lon, d.tipo, original))
+                guardarFavs(l)
+                aviso("Guardado en favoritos como «$nom»")
+            }
+        }
         actualizarEstrella()
         if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
+    }
+
+    private fun renombrarFav(f: Resultado, nuevo: String) {
+        val l = leerFavs()
+        val i = l.indexOfFirst { mismoLugar(it, f) }
+        if (i >= 0 && nuevo.isNotEmpty()) {
+            l[i] = Resultado(nuevo, f.lat, f.lon, f.tipo, f.detalle)
+            guardarFavs(l)
+        }
+        refrescarAjustes()
+    }
+
+    /** Lugares guardados cuyo nombre (o dirección) contiene lo que se escribe en la búsqueda. */
+    private fun coincidenciasGuardadas(q: String): List<Resultado> {
+        val nq = Texto.norm(q).trim()
+        val out = ArrayList<Resultado>()
+        if (nq.length < 2) return out
+        for (clave in arrayOf("casa", "trabajo")) {
+            val p = leerLugar(clave) ?: continue
+            if (Texto.norm(p.nombre).contains(nq) || Texto.norm(p.detalle).contains(nq)) out.add(p)
+        }
+        for (f in leerFavs()) {
+            if (Texto.norm(f.nombre).contains(nq) || Texto.norm(f.detalle).contains(nq)) out.add(f)
+        }
+        return out
+    }
+
+    /** Empieza a definir casa o trabajo: abre la búsqueda y el próximo lugar que elijas se guarda. */
+    private fun definirLugar(clave: String) {
+        definiendo = clave
+        if (panelAjustes.visibility == View.VISIBLE) {
+            panelAjustes.visibility = View.GONE
+            tvDiagAcerca = null
+            barraTab = null
+            tvTabInstal = null
+        }
+        abrirBusqueda()
+    }
+
+    private fun usarUbicacionActual() {
+        val clave = definiendo ?: return
+        val l = lastLoc
+        if (l == null) {
+            aviso("Aún no tengo tu posición.")
+            return
+        }
+        definiendo = null
+        guardarLugar(clave, Resultado(etiquetaLugar(clave), l.latitude, l.longitude, 7, "Mi ubicación actual"))
+        aviso("${etiquetaLugar(clave)} guardada con tu ubicación actual")
+        cerrarBusqueda()
+    }
+
+    private fun filaAtajo(res: Int, titulo: String, sub: String, tinte: Int, accion: () -> Unit): LinearLayout {
+        val pal = paleta()
+        val fila = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(11), dp(18), dp(11))
+            isClickable = true
+            setOnClickListener { accion() }
+        }
+        val ico = icono(res, 26, tinte)
+        (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
+        fila.addView(ico)
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(txt(15f, "sans-serif-medium", pal.texto).apply {
+            text = titulo
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        col.addView(txt(12f, "sans-serif", pal.sub).apply {
+            text = sub
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(0, dp(2), 0, 0)
+        })
+        fila.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        return fila
+    }
+
+    /** Atajos al abrir la búsqueda: casa, trabajo y favoritos (o "usar mi ubicación" si se está definiendo uno). */
+    private fun agregarAtajos(pal: Paleta) {
+        val dfn = definiendo
+        if (dfn != null) {
+            val t = txt(14f, "sans-serif", pal.sub)
+            t.text = "Elige dónde queda tu ${etiquetaLugar(dfn).lowercase(Locale.ROOT)}: busca una dirección, " +
+                "mantén pulsado el mapa o usa tu ubicación actual."
+            t.setLineSpacing(0f, 1.15f)
+            t.setPadding(dp(20), dp(14), dp(20), dp(8))
+            listaResultados.addView(t)
+            if (lastLoc != null) {
+                listaResultados.addView(
+                    filaAtajo(R.drawable.ic_my_location, "Mi ubicación actual", "Usar donde estoy ahora", pal.acento) { usarUbicacionActual() }
+                )
+            }
+            return
+        }
+        for (clave in arrayOf("casa", "trabajo")) {
+            val p = leerLugar(clave)
+            val ic = if (clave == "casa") R.drawable.ic_home else R.drawable.ic_work
+            listaResultados.addView(
+                filaAtajo(ic, etiquetaLugar(clave), if (p != null) p.detalle.ifEmpty { "Guardado" } else "Toca para definir", pal.acento) {
+                    if (p != null) seleccionarResultado(p) else definirLugar(clave)
+                }
+            )
+        }
+        val favs = leerFavs()
+        if (favs.isNotEmpty()) {
+            val t = txt(11.5f, "sans-serif-medium", pal.sub)
+            t.text = "FAVORITOS"
+            t.letterSpacing = 0.1f
+            t.setPadding(dp(20), dp(12), 0, dp(2))
+            listaResultados.addView(t)
+            for (f in favs.take(6)) {
+                listaResultados.addView(
+                    filaAtajo(R.drawable.ic_star_fill, f.nombre, if (f.detalle.isNotEmpty() && f.detalle != f.nombre) f.detalle else f.tipoTexto(), Color.parseColor("#F59E0B")) {
+                        seleccionarResultado(f)
+                    }
+                )
+            }
+        }
     }
 
     // ───────────────────────── ajustes ─────────────────────────
@@ -1803,6 +2319,7 @@ class MainActivity : Activity(), LocationListener {
                 "la app reconoce cuál es cada uno y los copia una sola vez."
             setLineSpacing(0f, 1.15f)
         })
+        if (Config.MANIFIESTO_URL.isNotEmpty() && manifiesto == null && !consultandoManifiesto && !instalando) consultarManifiesto()
         if (instalando) {
             val b = Barra(this)
             b.progreso = progreso
@@ -1813,15 +2330,44 @@ class MainActivity : Activity(), LocationListener {
             t.setPadding(0, dp(8), 0, 0)
             tvTabInstal = t
             tj.addView(t)
+            if (bajando) {
+                tj.addView(
+                    crearBotonTexto("Cancelar descarga", false) {
+                        cancelarBajada = true
+                        aviso("Cancelando…")
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+                )
+            }
         } else {
+            if (Config.MANIFIESTO_URL.isNotEmpty()) {
+                val man = manifiesto
+                val mb = if (man != null) man.totalBytes() / 1048576 else 0L
+                val actualiza = hayActualizacion() && mapPath != null
+                tj.addView(txt(13f, "sans-serif-medium", if (actualiza) pal.acento else pal.sub).apply {
+                    text = when {
+                        consultandoManifiesto -> "Consultando la última versión…"
+                        errorManifiesto.isNotEmpty() -> errorManifiesto
+                        man == null -> ""
+                        actualiza -> "Hay una versión nueva de los mapas (" + man.version + ")" + (if (mb > 0L) " · $mb MB" else "")
+                        mapPath != null -> "Tus mapas están al día (versión " + versionInstalada().ifEmpty { man.version } + ")"
+                        else -> "Disponible: versión " + man.version + (if (mb > 0L) " · $mb MB" else "")
+                    }
+                    setPadding(0, dp(12), 0, 0)
+                })
+                tj.addView(
+                    crearBotonTexto(if (actualiza) "Actualizar mapas" else if (mapPath != null) "Volver a descargar" else "Descargar mapas", !(mapPath != null && !actualiza)) { descargarMapas() },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+                )
+            }
             val fila = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             fila.addView(
-                crearBotonTexto("Elegir archivos", true) { elegirArchivos() },
+                crearBotonTexto("Elegir archivos", Config.MANIFIESTO_URL.isEmpty()) { elegirArchivos() },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) }
             )
             fila.addView(crearBotonTexto("Buscar en el pendrive", false) { buscarEnPendrive() })
             tj.addView(fila, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(14)
+                topMargin = dp(12)
             })
         }
         if (errorInstal.isNotEmpty()) {
@@ -1878,10 +2424,17 @@ class MainActivity : Activity(), LocationListener {
             ellipsize = TextUtils.TruncateAt.END
         })
         col.addView(txt(12f, "sans-serif", pal.sub).apply {
-            text = r.tipoTexto()
+            text = if (r.detalle.isNotEmpty() && r.detalle != r.nombre) r.detalle else r.tipoTexto()
             setPadding(0, dp(2), 0, 0)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         })
         f.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val editar = icono(R.drawable.ic_edit, 32, pal.sub)
+        editar.setOnClickListener {
+            mostrarDialogo("Nombre del favorito", "", r.nombre, null, "Guardar") { t, _ -> renombrarFav(r, t) }
+        }
+        f.addView(editar)
         val borrar = icono(R.drawable.ic_delete, 34, pal.sub)
         borrar.setOnClickListener {
             val l = leerFavs()
@@ -1897,9 +2450,49 @@ class MainActivity : Activity(), LocationListener {
         return f
     }
 
+    private fun filaCasaTrabajo(clave: String): LinearLayout {
+        val pal = paleta()
+        val p = leerLugar(clave)
+        val f = caja(18, 14, 12)
+        f.orientation = LinearLayout.HORIZONTAL
+        f.gravity = Gravity.CENTER_VERTICAL
+        f.isClickable = true
+        f.setOnClickListener { if (p != null) seleccionarResultado(p) else definirLugar(clave) }
+        val ico = icono(if (clave == "casa") R.drawable.ic_home else R.drawable.ic_work, 28, pal.acento)
+        (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
+        f.addView(ico)
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(txt(15f, "sans-serif-medium", pal.texto).apply { text = etiquetaLugar(clave) })
+        col.addView(txt(12.5f, "sans-serif", pal.sub).apply {
+            text = if (p != null) p.detalle.ifEmpty { "Guardado" } else "Toca para definir"
+            setPadding(0, dp(3), 0, 0)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        f.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (p != null) {
+            val cambiar = icono(R.drawable.ic_edit, 32, pal.sub)
+            cambiar.setOnClickListener { definirLugar(clave) }
+            f.addView(cambiar)
+            val quitar = icono(R.drawable.ic_delete, 34, pal.sub)
+            quitar.setOnClickListener {
+                guardarLugar(clave, null)
+                actualizarEstrella()
+                refrescarAjustes()
+            }
+            f.addView(quitar)
+        }
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.bottomMargin = dp(8)
+        f.layoutParams = lp
+        return f
+    }
+
     private fun tabLugares() {
         val pal = paleta()
         val c = contenidoAjustes
+        c.addView(seccion("Casa y trabajo"))
+        for (clave in arrayOf("casa", "trabajo")) c.addView(filaCasaTrabajo(clave))
         c.addView(seccion("Favoritos"))
         val favs = leerFavs()
         if (favs.isEmpty()) {
@@ -1986,38 +2579,179 @@ class MainActivity : Activity(), LocationListener {
             vozOn = v
             prefs.edit().putBoolean("voz", v).apply()
         })
-        val probar = caja(18, 16, 14)
-        probar.addView(crearBotonTexto("Probar voz", false) { probarVoz() })
-        c.addView(probar)
+        if (tts == null && !ttsFallo) iniciarTts { refrescarAjustes() }
+        val cv = caja(18, 16, 14)
+        val filaV = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        filaV.addView(
+            crearBotonTexto("Probar voz", true) { probarVoz() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) }
+        )
+        filaV.addView(crearBotonTexto("Voces del sistema", false) { abrirAjustesVoz() })
+        cv.addView(filaV)
+        cv.addView(txt(13f, "sans-serif-medium", pal.sub).apply {
+            text = "Velocidad de la voz"
+            setPadding(0, dp(16), 0, dp(8))
+        })
+        val filaVel = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val velocidades = arrayOf(Pair("Lenta", 0.8f), Pair("Normal", 0.95f), Pair("Rápida", 1.15f))
+        for ((nombre, v) in velocidades) {
+            filaVel.addView(
+                chip(nombre, Math.abs(velVoz - v) < 0.03f) {
+                    velVoz = v
+                    prefs.edit().putFloat("voz_vel", v).apply()
+                    tts?.setSpeechRate(v)
+                    refrescarAjustes()
+                    probarVoz()
+                },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) }
+            )
+        }
+        cv.addView(filaVel)
+        if (vocesEs.size > 1) {
+            cv.addView(txt(13f, "sans-serif-medium", pal.sub).apply {
+                text = "Voz (prueba cuál se entiende mejor)"
+                setPadding(0, dp(16), 0, dp(8))
+            })
+            val actualVoz = try { tts?.voice?.name } catch (e: Exception) { null }
+            val filaVoces = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val scrollVoces = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+            for ((i, v) in vocesEs.take(8).withIndex()) {
+                val pais = v.locale.displayCountry
+                val nombre = "Voz ${i + 1}" + (if (pais.isNotEmpty()) " · $pais" else "") + (if (v.isNetworkConnectionRequired) " ☁" else "")
+                filaVoces.addView(
+                    chip(nombre, v.name == actualVoz) {
+                        vozNombre = v.name
+                        prefs.edit().putString("voz_nombre", v.name).apply()
+                        tts?.setVoice(v)
+                        refrescarAjustes()
+                        probarVoz()
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) }
+                )
+            }
+            scrollVoces.addView(filaVoces)
+            cv.addView(scrollVoces)
+        }
+        cv.addView(txt(12f, "sans-serif", pal.sub).apply {
+            text = "Si la voz suena en otro idioma o poco clara, instala o elige una voz en español en «Voces del sistema»."
+            setPadding(0, dp(14), 0, 0)
+            setLineSpacing(0f, 1.15f)
+        })
+        c.addView(cv)
+    }
+
+    // ───────────────────────── voz ─────────────────────────
+
+    private val colaTts = ArrayList<() -> Unit>()
+    private var ttsFallo = false
+
+    private val abreviaturasVoz = arrayOf(
+        Pair("\\bAv\\.? ", "Avenida "), Pair("\\bCdla\\.? ", "Ciudadela "), Pair("\\bPje\\.? ", "Pasaje "),
+        Pair("\\bUrb\\.? ", "Urbanización "), Pair("\\bGral\\.? ", "General "), Pair("\\bDr\\.? ", "Doctor "),
+        Pair("\\bS/N\\b", "sin número")
+    )
+
+    /** Expande abreviaturas para que la voz las lea bien ("Av. 30" → "Avenida 30"). */
+    private fun textoParaVoz(t: String): String {
+        var s = t
+        for ((patron, reemplazo) in abreviaturasVoz) s = s.replace(Regex(patron, RegexOption.IGNORE_CASE), reemplazo)
+        return s
+    }
+
+    /** Inicia el motor de voz (una sola vez) y ejecuta `cuando` en cuanto esté listo. */
+    private fun iniciarTts(cuando: () -> Unit) {
+        if (tts != null && ttsListo) {
+            cuando()
+            return
+        }
+        colaTts.add(cuando)
+        if (tts == null) {
+            tts = TextToSpeech(this) { estado -> ui.post { alIniciarTts(estado) } }
+        }
+    }
+
+    private fun alIniciarTts(estado: Int) {
+        val m = tts
+        if (m == null || estado != TextToSpeech.SUCCESS) {
+            tts = null
+            ttsFallo = true
+            colaTts.clear()
+            aviso("Este equipo no tiene un motor de voz. En los ajustes del sistema instala «Servicios de voz de Google» u otro motor.")
+            return
+        }
+        // Idioma: español (Ecuador si existe; si no, otro español disponible)
+        var elegido: Locale? = null
+        for (loc in arrayOf(Locale("es", "EC"), Locale("es", "US"), Locale("es", "MX"), Locale("es", "ES"), Locale("es"))) {
+            if (m.isLanguageAvailable(loc) >= TextToSpeech.LANG_AVAILABLE) {
+                elegido = loc
+                break
+            }
+        }
+        if (elegido == null) {
+            ttsFallo = true
+            colaTts.clear()
+            aviso("No hay una voz en español instalada. Descárgala en los ajustes de voz del sistema.")
+            try { startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) } catch (e: Exception) { /* sin instalador */ }
+            return
+        }
+        m.setLanguage(elegido)
+        // Voces en español disponibles (para elegir la que mejor se entienda)
+        try {
+            val todas = m.voices
+            val es = ArrayList<Voice>()
+            if (todas != null) for (v in todas) if (v.locale.language == "es") es.add(v)
+            es.sortWith(compareByDescending<Voice> { it.quality }.thenBy { it.name })
+            vocesEs = es
+        } catch (e: Exception) {
+            vocesEs = emptyList()
+        }
+        val guardada = vocesEs.firstOrNull { it.name == vozNombre }
+        if (guardada != null) m.setVoice(guardada)
+        m.setSpeechRate(velVoz)
+        m.setPitch(1.0f)
+        try {
+            m.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+        } catch (e: Exception) { /* se usa el canal por defecto */ }
+        ttsListo = true
+        val pendientes = ArrayList(colaTts)
+        colaTts.clear()
+        for (f in pendientes) f()
+        if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
     }
 
     /** Habla un texto (si la voz está activada o se fuerza, p. ej. en "Probar voz"). */
     private fun hablar(t: String, forzar: Boolean = false) {
         if (!vozOn && !forzar) return
-        val actual = tts
-        if (actual == null) {
-            pendienteVoz = t
-            tts = TextToSpeech(this) { estado ->
-                if (estado == TextToSpeech.SUCCESS) {
-                    val r = tts?.setLanguage(Locale("es", "EC")) ?: -2
-                    if (r < 0) tts?.setLanguage(Locale("es"))
-                    ttsListo = true
-                    val p = pendienteVoz
-                    pendienteVoz = null
-                    if (p != null) tts?.speak(p, TextToSpeech.QUEUE_FLUSH, null, "nav")
-                } else {
-                    aviso("Este equipo no tiene una voz instalada.")
-                }
-            }
-        } else if (ttsListo) {
-            actual.speak(t, TextToSpeech.QUEUE_FLUSH, null, "nav")
-        } else {
-            pendienteVoz = t
-        }
+        val texto = textoParaVoz(t)
+        iniciarTts { tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, "nav") }
     }
 
     private fun probarVoz() {
-        hablar("En doscientos metros, gire a la derecha.", true)
+        hablar("En doscientos metros, gire a la derecha por la Avenida Amazonas.", true)
+    }
+
+    private fun abrirAjustesVoz() {
+        try {
+            startActivity(Intent("com.android.settings.TTS_SETTINGS"))
+        } catch (e: Exception) {
+            try { startActivity(Intent(Settings.ACTION_SETTINGS)) } catch (e2: Exception) { aviso("No pude abrir los ajustes del sistema.") }
+        }
+    }
+
+    private fun filaDato(clave: String, valor: String): LinearLayout {
+        val pal = paleta()
+        val f = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        f.addView(txt(13f, "sans-serif", pal.sub).apply { text = clave }, LinearLayout.LayoutParams(dp(120), ViewGroup.LayoutParams.WRAP_CONTENT))
+        f.addView(txt(15f, "sans-serif-medium", pal.texto).apply { text = valor })
+        return f
     }
 
     private fun tabAcerca() {
@@ -2043,6 +2777,16 @@ class MainActivity : Activity(), LocationListener {
         })
         cab.addView(col)
         c.addView(cab)
+        c.addView(seccion("Créditos"))
+        val cr = caja(18, 16, 14)
+        cr.addView(filaDato("Creador", Config.CREADOR))
+        cr.addView(filaDato("Propietario", Config.PROPIETARIO))
+        if (versionInstalada().isNotEmpty()) cr.addView(filaDato("Datos de mapas", "versión " + versionInstalada()))
+        cr.addView(txt(12f, "sans-serif", pal.sub).apply {
+            text = "© 2026 ${Config.PROPIETARIO} Todos los derechos reservados."
+            setPadding(0, dp(10), 0, 0)
+        })
+        c.addView(cr)
         c.addView(seccion("Mapas y datos"))
         c.addView(caja(18, 16, 14).apply {
             addView(txt(13f, "sans-serif", pal.sub).apply {
@@ -2355,7 +3099,7 @@ class MainActivity : Activity(), LocationListener {
         if (p.tipo == "arrive") {
             if (aSig <= 150.0 && (a and 1) == 0) {
                 pasoAnunciado[idx] = a or 1
-                hablar("Tu destino está a ${Math.round(aSig / 10.0) * 10} metros")
+                hablar("Su destino está a ${Math.round(aSig / 10.0) * 10} metros")
             }
             return
         }
@@ -2402,8 +3146,8 @@ class MainActivity : Activity(), LocationListener {
 
     private fun finalizarNavegacion(llegada: Boolean) {
         if (llegada) {
-            hablar("Has llegado a tu destino")
-            aviso("Has llegado a tu destino")
+            hablar("Ha llegado a su destino")
+            aviso("Ha llegado a su destino")
         }
         cancelarRuta()
         destino = null
