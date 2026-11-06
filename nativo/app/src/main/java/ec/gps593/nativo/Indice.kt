@@ -19,9 +19,12 @@ import java.nio.ByteOrder
 import java.text.Normalizer
 import java.util.Locale
 
-/** Un lugar encontrado (población, calle, servicio…). */
-class Resultado(val nombre: String, val lat: Double, val lon: Double, val tipo: Int, val detalle: String = "") {
-    fun tipoTexto(): String = when (tipo) {
+/** Un lugar encontrado (población, calle, comercio, servicio…). */
+class Resultado(
+    val nombre: String, val lat: Double, val lon: Double, val tipo: Int,
+    val detalle: String = "", val categoria: String = "", val origen: String = ""
+) {
+    fun tipoTexto(): String = if (categoria.isNotEmpty()) categoria else when (tipo) {
         0 -> "Ciudad"
         1 -> "Pueblo"
         2 -> "Aldea"
@@ -29,6 +32,17 @@ class Resultado(val nombre: String, val lat: Double, val lon: Double, val tipo: 
         4 -> "Caserío"
         5 -> "Servicio"
         6 -> "Calle"
+        7 -> "Comercio"
+        8 -> "Comida"
+        9 -> "Salud"
+        10 -> "Educación"
+        11 -> "Gasolinera"
+        12 -> "Banco"
+        13 -> "Alojamiento"
+        14 -> "Turismo"
+        15 -> "Transporte"
+        16 -> "Parque"
+        17 -> "Servicios"
         else -> "Lugar"
     }
 }
@@ -59,26 +73,36 @@ private class IntVec {
  * Se construye UNA vez a partir del bloque JSON de lugares del archivo .g593 (ver tools/build_graph.py)
  * y se guarda como `lugares.idx`, un archivo binario compacto que se carga en milisegundos.
  *
- * Formato (little-endian): "L593", versión, n, bytesNombres, bytesNorm,
- *   lat[n], lon[n] (grados * 1e5), ctx[n], offNombre[n+1], offNorm[n+1], tipo[n] (1 byte), nombres, normalizados.
+ * Formato v2 (little-endian): "L593", versión(2), n, bytesNombres, bytesNorm, bytesCategorias,
+ *   lat[n], lon[n] (grados * 1e5), ctx[n], offNombre[n+1], offNorm[n+1], offCategoria[n+1],
+ *   tipo[n] (1 byte), nombres, normalizados ("nombre|categoría"), categorías.
  */
 class IndiceLugares private constructor(private val bytes: ByteArray) {
     private val bb: ByteBuffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
     val total: Int = bb.getInt(8)
     private val dispLen: Int = bb.getInt(12)
-    private val posLat = 20
+    private val normLen: Int = bb.getInt(16)
+    private val posLat = 24
     private val posLon = posLat + 4 * total
     private val posCtx = posLon + 4 * total
     private val posDispOff = posCtx + 4 * total
     private val posNormOff = posDispOff + 4 * (total + 1)
-    private val posTipo = posNormOff + 4 * (total + 1)
+    private val posSubOff = posNormOff + 4 * (total + 1)
+    private val posTipo = posSubOff + 4 * (total + 1)
     private val baseDisp = posTipo + total
     private val baseNorm = baseDisp + dispLen
+    private val baseSub = baseNorm + normLen
 
     private fun nombreDe(i: Int): String {
         val o0 = bb.getInt(posDispOff + 4 * i)
         val o1 = bb.getInt(posDispOff + 4 * (i + 1))
         return String(bytes, baseDisp + o0, o1 - o0, Charsets.UTF_8)
+    }
+
+    private fun categoriaDe(i: Int): String {
+        val o0 = bb.getInt(posSubOff + 4 * i)
+        val o1 = bb.getInt(posSubOff + 4 * (i + 1))
+        return if (o1 > o0) String(bytes, baseSub + o0, o1 - o0, Charsets.UTF_8) else ""
     }
 
     private fun indexOf(a: Int, b: Int, t: ByteArray): Int {
@@ -97,38 +121,72 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
         return -1
     }
 
-    /** Busca lugares cuyo nombre contenga todas las palabras (sin tildes ni mayúsculas). */
-    fun buscar(consulta: String, max: Int = 8): List<Resultado> {
+    private fun contieneTodos(a: Int, b: Int, tb: List<ByteArray>): Boolean {
+        for (t in tb) if (indexOf(a, b, t) < 0) return false
+        return true
+    }
+
+    /** Poblaciones primero, luego comercios y servicios, y las calles al final. */
+    private fun rangoTipo(t: Int): Int = if (t <= 4) t else if (t == 6) 7 else 5
+
+    /**
+     * Busca lugares cuyo nombre o categoría contengan todas las palabras (sin tildes ni mayúsculas):
+     * "farmacia" encuentra todas las farmacias aunque se llamen distinto. Con una posición de referencia,
+     * entre resultados parecidos salen primero los más cercanos.
+     */
+    fun buscar(consulta: String, max: Int = 10, latRef: Double = Double.NaN, lonRef: Double = Double.NaN): List<Resultado> {
         val toks = Texto.norm(consulta).split(' ', '\t').filter { it.isNotEmpty() }
         if (toks.isEmpty()) return emptyList()
         val tb = toks.map { it.toByteArray(Charsets.UTF_8) }
         val nq = toks.joinToString(" ").toByteArray(Charsets.UTF_8)
-        val hits = ArrayList<Long>()
+        val conRef = !latRef.isNaN() && !lonRef.isNaN()
+        val cosRef = if (conRef) Math.cos(latRef * Math.PI / 180.0) else 1.0
+        val barra = '|'.code.toByte()
+        var hits = LongArray(2048)
+        var cnt = 0
         var i = 0
-        while (i < total && hits.size < 4000) {
+        while (i < total) {
             val a = baseNorm + bb.getInt(posNormOff + 4 * i)
             val b = baseNorm + bb.getInt(posNormOff + 4 * (i + 1))
-            var ok = true
-            for (t in tb) {
-                if (indexOf(a, b, t) < 0) { ok = false; break }
-            }
-            if (ok) {
-                var empieza = b - a >= nq.size
-                if (empieza) {
-                    for (k in nq.indices) if (bytes[a + k] != nq[k]) { empieza = false; break }
+            if (contieneTodos(a, b, tb)) {
+                var sep = b
+                var k = a
+                while (k < b) {
+                    if (bytes[k] == barra) {
+                        sep = k
+                        break
+                    }
+                    k++
                 }
-                val tipo = bytes[posTipo + i].toInt()
-                val score = (if (empieza) 0 else 10) + tipo
-                hits.add((score.toLong() shl 32) or i.toLong())
+                val enNombre = sep == b || contieneTodos(a, sep, tb)
+                var empieza = enNombre && sep - a >= nq.size
+                if (empieza) {
+                    for (q in nq.indices) {
+                        if (bytes[a + q] != nq[q]) {
+                            empieza = false
+                            break
+                        }
+                    }
+                }
+                val match = if (empieza) 0 else if (enNombre) 1 else 2
+                val rango = match * 10 + rangoTipo(bytes[posTipo + i].toInt())
+                var dcode = 0
+                if (conRef) {
+                    val dx = (bb.getInt(posLon + 4 * i) / 1e5 - lonRef) * cosRef * 111320.0
+                    val dy = (bb.getInt(posLat + 4 * i) / 1e5 - latRef) * 111320.0
+                    dcode = Math.min(0xFFFFF, (Math.hypot(dx, dy) / 100.0).toInt())
+                }
+                if (cnt == hits.size) hits = hits.copyOf(cnt * 2)
+                hits[cnt++] = (rango.toLong() shl 44) or (dcode.toLong() shl 24) or i.toLong()
             }
             i++
         }
-        hits.sort()
+        java.util.Arrays.sort(hits, 0, cnt)
         val vistos = HashSet<String>()
         val out = ArrayList<Resultado>()
-        for (h in hits) {
+        for (h in 0 until cnt) {
             if (out.size >= max) break
-            val idx = (h and 0xFFFFFFFFL).toInt()
+            val idx = (hits[h] and 0xFFFFFFL).toInt()
             val nom = nombreDe(idx)
             val ctx = bb.getInt(posCtx + 4 * idx)
             val completo = if (ctx >= 0 && ctx < total && ctx != idx) {
@@ -141,7 +199,8 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
                     completo,
                     bb.getInt(posLat + 4 * idx) / 1e5,
                     bb.getInt(posLon + 4 * idx) / 1e5,
-                    bytes[posTipo + idx].toInt()
+                    bytes[posTipo + idx].toInt(),
+                    "", categoriaDe(idx), "sin internet"
                 )
             )
         }
@@ -152,7 +211,8 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
         /** Carga un índice ya construido. Devuelve null si el archivo no es válido. */
         fun cargar(f: File): IndiceLugares? {
             val b = f.readBytes()
-            if (b.size < 20 || String(b, 0, 4, Charsets.US_ASCII) != "L593") return null
+            if (b.size < 24 || String(b, 0, 4, Charsets.US_ASCII) != "L593") return null
+            if (ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).getInt(4) != 2) return null   // versión anterior: se reconstruye
             return IndiceLugares(b)
         }
 
@@ -178,6 +238,8 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
             val norm = ByteArrayOutputStream(1 shl 20)
             val nOff = IntVec()
             val nb = ByteArrayOutputStream(1 shl 20)
+            val subOff = IntVec()
+            val sb = ByteArrayOutputStream(1 shl 16)
 
             FileInputStream(g593).use { fis ->
                 fis.channel.position(longitud - jl)
@@ -205,11 +267,17 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
                                 val lo = r.nextDouble()
                                 val ti = r.nextInt()
                                 val cx = r.nextInt()
+                                var sub = ""
+                                if (r.hasNext()) {
+                                    if (r.peek() == JsonToken.NULL) r.nextNull() else sub = r.nextString()
+                                }
                                 r.endArray()
                                 dispOff.add(disp.size())
                                 disp.write(nombre.toByteArray(Charsets.UTF_8))
                                 normOff.add(norm.size())
-                                norm.write(Texto.norm(nombre).toByteArray(Charsets.UTF_8))
+                                norm.write((Texto.norm(nombre.replace('|', ' ')) + "|" + Texto.norm(sub)).toByteArray(Charsets.UTF_8))
+                                subOff.add(sb.size())
+                                sb.write(sub.toByteArray(Charsets.UTF_8))
                                 lat.add(Math.round(la * 1e5).toInt())
                                 lon.add(Math.round(lo * 1e5).toInt())
                                 tipo.add(ti)
@@ -226,24 +294,29 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
             val n = lat.n
             dispOff.add(disp.size())
             normOff.add(norm.size())
+            subOff.add(sb.size())
             val dBytes = disp.toByteArray()
             val nBytes = norm.toByteArray()
+            val sBytes = sb.toByteArray()
 
-            val tam = 20 + 4 * n * 3 + 4 * (n + 1) * 2 + n + dBytes.size + nBytes.size
+            val tam = 24 + 4 * n * 3 + 4 * (n + 1) * 3 + n + dBytes.size + nBytes.size + sBytes.size
             val out = ByteBuffer.allocate(tam).order(ByteOrder.LITTLE_ENDIAN)
             out.put("L593".toByteArray(Charsets.US_ASCII))
-            out.putInt(1)
+            out.putInt(2)
             out.putInt(n)
             out.putInt(dBytes.size)
             out.putInt(nBytes.size)
+            out.putInt(sBytes.size)
             for (i in 0 until n) out.putInt(lat.a[i])
             for (i in 0 until n) out.putInt(lon.a[i])
             for (i in 0 until n) out.putInt(ctx.a[i])
             for (i in 0..n) out.putInt(dispOff.a[i])
             for (i in 0..n) out.putInt(normOff.a[i])
+            for (i in 0..n) out.putInt(subOff.a[i])
             for (i in 0 until n) out.put(tipo.a[i].toByte())
             out.put(dBytes)
             out.put(nBytes)
+            out.put(sBytes)
 
             // Nombres de calles (los usa el motor de rutas para las instrucciones)
             nOff.add(nb.size())
@@ -319,7 +392,7 @@ object BusquedaEnLinea {
                     if (v.isNotEmpty() && !partes.contains(v)) partes.add(v)
                 }
                 if (partes.isEmpty()) continue
-                out.add(Resultado(partes.joinToString(", "), coords.getDouble(1), coords.getDouble(0), 6))
+                out.add(Resultado(partes.joinToString(", "), coords.getDouble(1), coords.getDouble(0), 6, "", "", "en línea"))
             }
             return out
         } finally {

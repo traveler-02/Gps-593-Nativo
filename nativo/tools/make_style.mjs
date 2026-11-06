@@ -89,11 +89,12 @@ function estilo(flavor) {
       paint: { 'line-color': dark ? '#5B9BFF' : '#2563EB',
                'line-width': ['interpolate', ['linear'], ['zoom'], 6, 3, 12, 6.5, 17, 12] } }
   );
+  // Tu posición: una imagen que la app dibuja (punto, flecha, triángulo, auto o taxi) y que gira con el rumbo
   L.push(
-    { id: 'yo-halo', type: 'circle', source: 'yo',
-      paint: { 'circle-radius': 16, 'circle-color': dark ? '#7DB2FF' : '#2563EB', 'circle-opacity': 0.20 } },
-    { id: 'yo-punto', type: 'circle', source: 'yo',
-      paint: { 'circle-radius': 8, 'circle-color': dark ? '#7DB2FF' : '#2563EB', 'circle-stroke-color': dark ? '#0B1220' : '#ffffff', 'circle-stroke-width': 3 } }
+    { id: 'yo-icono', type: 'symbol', source: 'yo',
+      layout: { 'icon-image': ['get', 'icono'], 'icon-rotate': ['coalesce', ['get', 'rumbo'], 0],
+                'icon-rotation-alignment': 'map', 'icon-pitch-alignment': 'map',
+                'icon-allow-overlap': true, 'icon-ignore-placement': true } }
   );
   // Marcador del lugar elegido en la búsqueda (círculo rojo con halo)
   L.push(

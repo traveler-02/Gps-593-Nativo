@@ -1,4 +1,4 @@
-# GPS 593 nativo — prototipo 0.7 (mapa, búsqueda, navegación, lugares guardados y descarga de mapas)
+# GPS 593 nativo — prototipo 0.8
 
 App Android **nativa** (Kotlin, sin AppCompat ni Compose) que dibuja `ecuador.pmtiles` con MapLibre Native
 (OpenGL ES) y muestra tu posición GPS, con un **panel de diagnóstico** para medir en la radio.
@@ -20,8 +20,8 @@ La nativa es `ec.gps593.nativo` y se llama "GPS 593 nativo" (mismo logo). Para n
 (o ejecuta una vez `gradle wrapper --gradle-version 8.9`).
 
 ## Cómo saber que abriste la app NATIVA (y no la web anterior)
-- Al abrir: pantalla con el logo y "Versión nativa 0.7"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
-- Ajustes › Acerca de muestra "Versión nativa 0.7" y el diagnóstico. La app web anterior dice "WebView Chrome".
+- Al abrir: pantalla con el logo y "Versión nativa 0.8"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
+- Ajustes › Acerca de muestra "Versión nativa 0.8" y el diagnóstico. La app web anterior dice "WebView Chrome".
 
 ## Instalar los archivos (una sola vez)
 La primera vez aparece la tarjeta **"Instala el mapa de Ecuador"**; también está en **Ajustes › Mapas**.
@@ -36,6 +36,13 @@ Al instalar el `.g593` se prepara el índice de búsqueda (una sola vez, algunos
 - **Búsqueda**: lugares, barrios y calles sin internet (con el `.g593`); si no hay resultados, prueba con internet (Photon, solo demo).
 - **Mantén pulsado el mapa** para elegir cualquier punto como destino.
 - **Ajustes**: *Mapas*, *Lugares* (favoritos), *Preferencias* (modo, pantalla, mapa 3D, voz) y *Acerca de* (diagnóstico).
+
+## Tu posición en el mapa
+Ajustes › Preferencias › *Tu posición en el mapa*: **punto, flecha, triángulo, auto o taxi**. Todos menos el punto giran hacia donde te mueves (parado, conservan la última dirección).
+
+## Más lugares en la búsqueda
+La búsqueda ahora incluye comercios, restaurantes, salud, educación, bancos, hoteles, turismo, transporte, parques y servicios (puntos **y edificios**), y entiende categorías: "farmacia", "supermercado"… Entre resultados parecidos salen primero los más cercanos, con la distancia. Si hay pocos, se completa con internet.
+**Hay que volver a generar el `.g593`** con el flujo *Crear mapa y rutas de Ecuador* para que traiga estos lugares; la app reconstruye el índice sola. Detalles y Overture Maps (opcional): **LUGARES.md**.
 
 ## Lugares guardados
 - **Casa y trabajo**: en la búsqueda (al abrirla) y en Ajustes › Lugares. Toca "Casa" o "Trabajo" para ir; si no están definidos, "Toca para definir" abre la búsqueda y el lugar que elijas queda guardado (también con "Mi ubicación actual" o manteniendo pulsado el mapa).

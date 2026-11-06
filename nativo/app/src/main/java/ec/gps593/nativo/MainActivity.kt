@@ -7,10 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -71,7 +73,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.7"
+private const val VERSION = "0.8"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
@@ -163,6 +165,14 @@ class MainActivity : Activity(), LocationListener {
 
     // Casa / trabajo (null = no se está definiendo ninguno)
     private var definiendo: String? = null
+
+    // Marcador de tu posición (0 punto, 1 flecha, 2 triángulo, 3 auto, 4 taxi) y rumbo
+    private var marcadorTipo = 1
+    private var ultimoRumbo = 0f
+
+    // Posición de referencia de la última búsqueda (para mostrar distancias y ordenar por cercanía)
+    private var refLat = Double.NaN
+    private var refLon = Double.NaN
 
     // Voz
     private var velVoz = 0.95f
@@ -307,6 +317,7 @@ class MainActivity : Activity(), LocationListener {
         pantallaOn = prefs.getBoolean("pantalla", true)
         vozOn = prefs.getBoolean("voz", true)
         inclinado = prefs.getBoolean("inclinado", memoriaTotalMb() >= 3500L)
+        marcadorTipo = prefs.getInt("marcador", 1)
         velVoz = prefs.getFloat("voz_vel", 0.95f)
         vozNombre = prefs.getString("voz_nombre", "") ?: ""
         night = calcularNoche()
@@ -1107,6 +1118,7 @@ class MainActivity : Activity(), LocationListener {
         val mw = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         splash = FrameLayout(this)
+        // Una columna que ocupa todo el ancho: cada elemento queda centrado sobre el mismo eje que el logo
         val centro = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -1115,18 +1127,29 @@ class MainActivity : Activity(), LocationListener {
             setImageResource(R.drawable.logo)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        centro.addView(logo, LinearLayout.LayoutParams(dp(120), dp(120)))
+        centro.addView(logo, LinearLayout.LayoutParams(dp(124), dp(124)).apply { gravity = Gravity.CENTER_HORIZONTAL })
         splashTitulo = texto(30f, "sans-serif-medium").apply {
             text = "GPS 593"
             letterSpacing = 0.12f
-            setPadding(0, dp(14), 0, 0)
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            // El espaciado entre letras también se añade tras la última: se compensa para que quede centrado de verdad
+            setPadding((textSize * 0.12f).toInt(), dp(16), 0, 0)
         }
-        splashSub = texto(14f).apply { text = "Versión nativa $VERSION"; setPadding(0, dp(6), 0, 0) }
+        splashSub = texto(14f).apply {
+            text = "Versión nativa $VERSION"
+            gravity = Gravity.CENTER
+            textAlignment = View.TEXT_ALIGNMENT_CENTER
+            setPadding(0, dp(6), 0, 0)
+        }
         val barra = Barra(this).apply { indeterminada = true }
-        centro.addView(splashTitulo)
-        centro.addView(splashSub)
-        centro.addView(barra, LinearLayout.LayoutParams(dp(170), dp(4)).apply { topMargin = dp(22) })
-        splash.addView(centro, FrameLayout.LayoutParams(wc, wc, Gravity.CENTER))
+        centro.addView(splashTitulo, LinearLayout.LayoutParams(mw, wc))
+        centro.addView(splashSub, LinearLayout.LayoutParams(mw, wc))
+        centro.addView(barra, LinearLayout.LayoutParams(dp(170), dp(4)).apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            topMargin = dp(24)
+        })
+        splash.addView(centro, FrameLayout.LayoutParams(mw, wc, Gravity.CENTER))
         raiz.addView(splash, FrameLayout.LayoutParams(mw, mw))
     }
 
@@ -1316,7 +1339,7 @@ class MainActivity : Activity(), LocationListener {
         }
         // Mantener pulsado = elegir ese punto del mapa (destino o posición de prueba)
         m.addOnMapLongClickListener { p ->
-            seleccionarResultado(Resultado("Punto elegido en el mapa", p.latitude, p.longitude, 7))
+            seleccionarResultado(Resultado("Punto elegido en el mapa", p.latitude, p.longitude, 99))
             true
         }
         // Vista inicial: todo Ecuador
@@ -1345,6 +1368,7 @@ class MainActivity : Activity(), LocationListener {
         }
         m.setStyle(Style.Builder().fromJson(json)) { style ->
             estilo = style
+            aplicarMarcador(style)
             ponerPosicion(lastLoc)
             ponerDestino()
             ponerRuta()
@@ -1754,7 +1778,12 @@ class MainActivity : Activity(), LocationListener {
                 if (!idx.exists() || !nombresCalles.exists() || idx.lastModified() < g.lastModified()) {
                     IndiceLugares.construir(g, idx)
                 }
-                val ind = IndiceLugares.cargar(idx) ?: throw RuntimeException("índice no válido")
+                var cargado = IndiceLugares.cargar(idx)
+                if (cargado == null) {                       // índice de una versión anterior: se reconstruye una vez
+                    IndiceLugares.construir(g, idx)
+                    cargado = IndiceLugares.cargar(idx)
+                }
+                val ind: IndiceLugares = cargado ?: throw RuntimeException("índice no válido")
                 val cl = Calles.cargar(nombresCalles)
                 ui.post {
                     indice = ind
@@ -1843,24 +1872,38 @@ class MainActivity : Activity(), LocationListener {
         } else {
             val id = ++busquedaId
             val ind = indice
+            // Referencia para ordenar por cercanía: tu posición o, si no la hay, el centro del mapa
+            val l = lastLoc
+            val centroMapa = map?.cameraPosition?.target
+            val rLat = if (l != null) l.latitude else if (centroMapa != null) centroMapa.latitude else Double.NaN
+            val rLon = if (l != null) l.longitude else if (centroMapa != null) centroMapa.longitude else Double.NaN
+            refLat = rLat
+            refLon = rLon
             Thread {
-                var res: List<Resultado> = emptyList()
-                var origen = ""
+                val lista = ArrayList<Resultado>()
+                var fallo = false
                 try {
-                    if (ind != null) {
-                        res = ind.buscar(q)
-                        origen = "sin internet"
-                    }
-                    if (res.isEmpty()) {
-                        res = BusquedaEnLinea.buscar(q)
-                        origen = "en línea"
-                    }
+                    if (ind != null) lista.addAll(ind.buscar(q, 10, rLat, rLon))
                 } catch (e: Throwable) {
-                    origen = "error"
+                    fallo = true
+                }
+                // Si hay pocos resultados sin internet, se completa con la búsqueda en línea (si hay conexión)
+                if (lista.size < 6 && q.length >= 3) {
+                    try {
+                        for (r in BusquedaEnLinea.buscar(q)) {
+                            val nr = Texto.norm(r.nombre)
+                            val repetido = lista.any { x ->
+                                Texto.norm(x.nombre) == nr || Geo.dm(x.lat, x.lon, r.lat, r.lon) < 80.0
+                            }
+                            if (!repetido) lista.add(r)
+                        }
+                    } catch (e: Throwable) {
+                        if (lista.isEmpty()) fallo = true
+                    }
                 }
                 val guardados = coincidenciasGuardadas(q)
-                val todos = guardados + res.filter { r -> guardados.none { g -> mismoLugar(g, r) } }
-                ui.post { if (id == busquedaId) mostrarResultados(todos, q, origen) }
+                val todos = guardados + lista.filter { r -> guardados.none { g -> mismoLugar(g, r) } }
+                ui.post { if (id == busquedaId) mostrarResultados(todos, q, if (fallo && lista.isEmpty()) "error" else "") }
             }.start()
         }
     }
@@ -1938,7 +1981,10 @@ class MainActivity : Activity(), LocationListener {
                 ellipsize = TextUtils.TruncateAt.END
             }
             val sub = txt(12f, "sans-serif", pal.sub).apply {
-                text = if (r.detalle.isNotEmpty()) "Guardado · " + r.detalle else r.tipoTexto() + " · " + origen
+                text = if (r.detalle.isNotEmpty()) "Guardado · " + r.detalle else {
+                    val dist = if (!refLat.isNaN() && !refLon.isNaN()) " · " + Geo.dist(Geo.dm(refLat, refLon, r.lat, r.lon)) else ""
+                    r.tipoTexto() + dist + " · " + (if (r.origen.isNotEmpty()) r.origen else origen)
+                }
                 setPadding(0, dp(2), 0, 0)
             }
             col.addView(nombre)
@@ -2144,7 +2190,7 @@ class MainActivity : Activity(), LocationListener {
             return
         }
         definiendo = null
-        guardarLugar(clave, Resultado(etiquetaLugar(clave), l.latitude, l.longitude, 7, "Mi ubicación actual"))
+        guardarLugar(clave, Resultado(etiquetaLugar(clave), l.latitude, l.longitude, 99, "Mi ubicación actual"))
         aviso("${etiquetaLugar(clave)} guardada con tu ubicación actual")
         cerrarBusqueda()
     }
@@ -2568,6 +2614,53 @@ class MainActivity : Activity(), LocationListener {
             else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         })
 
+        c.addView(seccion("Tu posición en el mapa"))
+        val cm = caja(18, 14, 14)
+        cm.addView(txt(12.5f, "sans-serif", pal.sub).apply {
+            text = "Elige cómo se ve tu posición. La flecha, el triángulo y los vehículos giran hacia donde te mueves."
+            setPadding(0, 0, 0, dp(10))
+            setLineSpacing(0f, 1.15f)
+        })
+        val scrollMarc = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val filaMarc = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val nombresMarc = arrayOf("Punto", "Flecha", "Triángulo", "Auto", "Taxi")
+        for (i in nombresMarc.indices) {
+            val elegido = marcadorTipo == i
+            val tarj = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(12), dp(10), dp(12), dp(8))
+                isClickable = true
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(16).toFloat()
+                    setColor(if (elegido) Color.argb(28, Color.red(pal.acento), Color.green(pal.acento), Color.blue(pal.acento)) else Color.TRANSPARENT)
+                    setStroke(dp(if (elegido) 2 else 1), if (elegido) pal.acento else pal.borde)
+                }
+                setOnClickListener {
+                    marcadorTipo = i
+                    prefs.edit().putInt("marcador", i).apply()
+                    estilo?.let { st -> aplicarMarcador(st) }
+                    ponerPosicion(lastLoc)
+                    refrescarAjustes()
+                }
+            }
+            val vista = ImageView(this).apply {
+                setImageBitmap(crearMarcador(i))
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            tarj.addView(vista, LinearLayout.LayoutParams(dp(52), dp(52)))
+            tarj.addView(txt(12f, "sans-serif-medium", if (elegido) pal.acento else pal.sub).apply {
+                text = nombresMarc[i]
+                setPadding(0, dp(4), 0, 0)
+            })
+            filaMarc.addView(tarj, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(8)
+            })
+        }
+        scrollMarc.addView(filaMarc)
+        cm.addView(scrollMarc)
+        c.addView(cm)
+
         c.addView(seccion("Navegación"))
         c.addView(filaInterruptor("Mapa inclinado (3D)", "Más atractivo; desactívalo si tu equipo va lento", inclinado) { v ->
             inclinado = v
@@ -2790,7 +2883,7 @@ class MainActivity : Activity(), LocationListener {
         c.addView(seccion("Mapas y datos"))
         c.addView(caja(18, 16, 14).apply {
             addView(txt(13f, "sans-serif", pal.sub).apply {
-                text = "Mapas © OpenStreetMap contributors · teselas Protomaps · motor MapLibre Native · íconos Material Symbols."
+                text = "Mapas y lugares © OpenStreetMap contributors · lugares adicionales © Overture Maps Foundation (si el archivo de mapas los incluye) · teselas Protomaps · motor MapLibre Native · íconos Material Symbols."
                 setLineSpacing(0f, 1.2f)
             })
         })
@@ -2891,12 +2984,120 @@ class MainActivity : Activity(), LocationListener {
         gpsActivo = false
     }
 
-    private fun puntoJson(l: Location): String =
-        "{\"type\":\"Point\",\"coordinates\":[${l.longitude},${l.latitude}]}"
+    /** Dibuja el marcador elegido (mira hacia arriba = norte; el mapa lo gira con el rumbo). */
+    private fun crearMarcador(tipo: Int): Bitmap {
+        val s = Math.max(48, dp(56))
+        val bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+        bmp.density = resources.displayMetrics.densityDpi
+        val c = Canvas(bmp)
+        val f = s.toFloat()
+        val azul = Color.parseColor(if (night) "#7DB2FF" else "#2563EB")
+        val relleno = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val borde = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.WHITE
+            strokeWidth = f * 0.055f
+            strokeJoin = Paint.Join.ROUND
+        }
+        val sombra = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor("#44000000")
+        }
+        when (tipo) {
+            0 -> {                                              // punto con halo
+                relleno.color = Color.argb(70, Color.red(azul), Color.green(azul), Color.blue(azul))
+                c.drawCircle(f / 2, f / 2, f * 0.46f, relleno)
+                relleno.color = azul
+                c.drawCircle(f / 2, f / 2, f * 0.24f, relleno)
+                c.drawCircle(f / 2, f / 2, f * 0.24f, borde)
+            }
+            1 -> {                                              // flecha de navegación
+                val p = Path()
+                p.moveTo(f * 0.5f, f * 0.07f)
+                p.lineTo(f * 0.86f, f * 0.90f)
+                p.lineTo(f * 0.5f, f * 0.68f)
+                p.lineTo(f * 0.14f, f * 0.90f)
+                p.close()
+                c.save()
+                c.translate(f * 0.02f, f * 0.03f)
+                c.drawPath(p, sombra)
+                c.restore()
+                relleno.color = azul
+                c.drawPath(p, relleno)
+                c.drawPath(p, borde)
+            }
+            2 -> {                                              // triángulo
+                val p = Path()
+                p.moveTo(f * 0.5f, f * 0.10f)
+                p.lineTo(f * 0.86f, f * 0.86f)
+                p.lineTo(f * 0.14f, f * 0.86f)
+                p.close()
+                c.save()
+                c.translate(f * 0.02f, f * 0.03f)
+                c.drawPath(p, sombra)
+                c.restore()
+                relleno.color = azul
+                c.drawPath(p, relleno)
+                c.drawPath(p, borde)
+            }
+            else -> {                                           // auto visto desde arriba (4 = taxi amarillo)
+                val color = if (tipo == 4) Color.parseColor("#FBBF24") else azul
+                val oscuro = Color.parseColor("#1E293B")
+                c.drawOval(RectF(f * 0.18f, f * 0.12f, f * 0.84f, f * 0.98f), sombra)
+                relleno.color = oscuro                          // ruedas
+                for (y in floatArrayOf(0.20f, 0.66f)) {
+                    c.drawRoundRect(RectF(f * 0.22f, f * y, f * 0.30f, f * (y + 0.16f)), f * 0.03f, f * 0.03f, relleno)
+                    c.drawRoundRect(RectF(f * 0.70f, f * y, f * 0.78f, f * (y + 0.16f)), f * 0.03f, f * 0.03f, relleno)
+                }
+                val cuerpo = RectF(f * 0.28f, f * 0.05f, f * 0.72f, f * 0.95f)
+                relleno.color = color
+                c.drawRoundRect(cuerpo, f * 0.14f, f * 0.14f, relleno)
+                c.drawRoundRect(cuerpo, f * 0.14f, f * 0.14f, borde)
+                relleno.color = oscuro                          // parabrisas y luneta
+                val pb = Path()
+                pb.moveTo(f * 0.33f, f * 0.31f)
+                pb.lineTo(f * 0.67f, f * 0.31f)
+                pb.lineTo(f * 0.63f, f * 0.43f)
+                pb.lineTo(f * 0.37f, f * 0.43f)
+                pb.close()
+                c.drawPath(pb, relleno)
+                val lu = Path()
+                lu.moveTo(f * 0.36f, f * 0.70f)
+                lu.lineTo(f * 0.64f, f * 0.70f)
+                lu.lineTo(f * 0.67f, f * 0.80f)
+                lu.lineTo(f * 0.33f, f * 0.80f)
+                lu.close()
+                c.drawPath(lu, relleno)
+                relleno.color = Color.argb(60, 0, 0, 0)         // techo
+                c.drawRoundRect(RectF(f * 0.34f, f * 0.44f, f * 0.66f, f * 0.69f), f * 0.04f, f * 0.04f, relleno)
+                if (tipo == 4) {                                // letrero de taxi
+                    relleno.color = oscuro
+                    c.drawRoundRect(RectF(f * 0.42f, f * 0.52f, f * 0.58f, f * 0.58f), f * 0.02f, f * 0.02f, relleno)
+                }
+                relleno.color = Color.parseColor("#FFF7CC")     // faros
+                c.drawCircle(f * 0.36f, f * 0.10f, f * 0.032f, relleno)
+                c.drawCircle(f * 0.64f, f * 0.10f, f * 0.032f, relleno)
+                relleno.color = Color.parseColor("#EF4444")     // luces traseras
+                c.drawCircle(f * 0.36f, f * 0.91f, f * 0.028f, relleno)
+                c.drawCircle(f * 0.64f, f * 0.91f, f * 0.028f, relleno)
+            }
+        }
+        return bmp
+    }
+
+    /** Registra en el mapa la imagen del marcador elegido (se vuelve a llamar al cambiar de estilo o de opción). */
+    private fun aplicarMarcador(style: Style) {
+        style.addImage("marcador-$marcadorTipo", crearMarcador(marcadorTipo))
+    }
 
     private fun ponerPosicion(l: Location?) {
         if (l == null) return
-        estilo?.getSourceAs<GeoJsonSource>("yo")?.setGeoJson(puntoJson(l))
+        // El rumbo solo se actualiza si te mueves; parado, el marcador conserva la última dirección
+        val moviendo = l.hasBearing() && (!l.hasSpeed() || l.speed > 0.8f)
+        if (moviendo) ultimoRumbo = l.bearing
+        val json = "{\"type\":\"Feature\",\"properties\":{\"rumbo\":$ultimoRumbo,\"icono\":\"marcador-$marcadorTipo\"}," +
+            "\"geometry\":{\"type\":\"Point\",\"coordinates\":[${l.longitude},${l.latitude}]}}"
+        estilo?.getSourceAs<GeoJsonSource>("yo")?.setGeoJson(json)
     }
 
     override fun onLocationChanged(location: Location) {
