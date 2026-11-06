@@ -1,5 +1,5 @@
 # Compila el APK NATIVO (Kotlin + MapLibre) de GPS 593 y lo publica en la Release "android-nativo".
-# Uso: pestaña Actions > "Compilar APK nativo" > Run workflow. Descarga gps593-nativo.apk desde Releases.
+# Uso: pestaña Actions > "Compilar APK nativo" > Run workflow. Descarga GPS593-NATIVO.apk desde Releases (o el artefacto de la ejecución).
 name: Compilar APK nativo
 on:
   workflow_dispatch:
@@ -36,13 +36,31 @@ jobs:
               echo "::error::El APK no trae libmaplibre.so para $abi (el SDK de mapas no la publica para esa arquitectura)"; exit 1; }
           done
           echo "OK: librerías nativas presentes para: $ABIS"
+      - name: Datos del APK (aparecen en el resumen de la ejecución)
+        run: |
+          APK=nativo/app/build/outputs/apk/release/app-release.apk
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | tail -1)
+          {
+            echo "### APK NATIVO compilado"
+            echo '```'
+            if [ -n "$AAPT" ]; then "$AAPT" dump badging "$APK" | grep -E "^(package:|application-label:|native-code:)" || true; fi
+            ls -l "$APK"
+            echo '```'
+            echo "Debe decir: package ec.gps593.nativo · application-label GPS 593 nativo. La app web anterior es ec.gps593.app."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Guardar el APK como archivo descargable de esta ejecución
+        uses: actions/upload-artifact@v4
+        with:
+          name: GPS593-NATIVO-apk
+          path: nativo/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
       - name: Publicar el APK en Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp nativo/app/build/outputs/apk/release/app-release.apk gps593-nativo.apk
+          cp nativo/app/build/outputs/apk/release/app-release.apk GPS593-NATIVO.apk
           gh release view android-nativo -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create android-nativo -R "$GITHUB_REPOSITORY" --title "GPS 593 nativo (prototipo)" \
               --notes "Prototipo nativo: mapa + GPS + panel de diagnóstico. Instálalo en la radio."
-          gh release upload android-nativo gps593-nativo.apk -R "$GITHUB_REPOSITORY" --clobber
+          gh release upload android-nativo GPS593-NATIVO.apk -R "$GITHUB_REPOSITORY" --clobber
           echo "Descarga: https://github.com/$GITHUB_REPOSITORY/releases/tag/android-nativo"
