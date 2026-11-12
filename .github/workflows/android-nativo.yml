@@ -58,9 +58,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp nativo/app/build/outputs/apk/release/app-release.apk GPS593-NATIVO.apk
+          APK_NAME="GPS593-NATIVO-${{ github.run_number }}.apk"
+          cp nativo/app/build/outputs/apk/release/app-release.apk "$APK_NAME"
           gh release view android-nativo -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create android-nativo -R "$GITHUB_REPOSITORY" --title "GPS 593 nativo (prototipo)" \
               --notes "Prototipo nativo: mapa + GPS + panel de diagnóstico. Instálalo en la radio."
-          gh release upload android-nativo GPS593-NATIVO.apk -R "$GITHUB_REPOSITORY" --clobber
+          gh release upload android-nativo "$APK_NAME" -R "$GITHUB_REPOSITORY" --clobber
           echo "Descarga: https://github.com/$GITHUB_REPOSITORY/releases/tag/android-nativo"
