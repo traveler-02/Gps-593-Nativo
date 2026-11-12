@@ -1,4 +1,4 @@
-# GPS 593 nativo — prototipo 0.8
+# GPS 593 nativo — prototipo 0.9
 
 App Android **nativa** (Kotlin, sin AppCompat ni Compose) que dibuja `ecuador.pmtiles` con MapLibre Native
 (OpenGL ES) y muestra tu posición GPS, con un **panel de diagnóstico** para medir en la radio.
@@ -20,8 +20,8 @@ La nativa es `ec.gps593.nativo` y se llama "GPS 593 nativo" (mismo logo). Para n
 (o ejecuta una vez `gradle wrapper --gradle-version 8.9`).
 
 ## Cómo saber que abriste la app NATIVA (y no la web anterior)
-- Al abrir: pantalla con el logo y "Versión nativa 0.8"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
-- Ajustes › Acerca de muestra "Versión nativa 0.8" y el diagnóstico. La app web anterior dice "WebView Chrome".
+- Al abrir: pantalla con el logo y "Versión nativa 0.9"; luego tarjeta de velocidad, barra "¿A dónde vamos?" y botones redondos.
+- Ajustes › Acerca de muestra "Versión nativa 0.9" y el diagnóstico. La app web anterior dice "WebView Chrome".
 
 ## Instalar los archivos (una sola vez)
 La primera vez aparece la tarjeta **"Instala el mapa de Ecuador"**; también está en **Ajustes › Mapas**.
@@ -36,6 +36,12 @@ Al instalar el `.g593` se prepara el índice de búsqueda (una sola vez, algunos
 - **Búsqueda**: lugares, barrios y calles sin internet (con el `.g593`); si no hay resultados, prueba con internet (Photon, solo demo).
 - **Mantén pulsado el mapa** para elegir cualquier punto como destino.
 - **Ajustes**: *Mapas*, *Lugares* (favoritos), *Preferencias* (modo, pantalla, mapa 3D, voz) y *Acerca de* (diagnóstico).
+
+## Posición fluida, velocímetro y brújula
+- El GPS manda: la red, el proveedor fusionado y el pasivo solo se usan si no hay un GPS reciente (sus posiciones sin velocidad ni rumbo hacían que el cursor se trabara y el velocímetro marcara 0). Si una posición no trae velocidad, se calcula con lo que avanzaste.
+- El cursor y la cámara se mueven con transición suave entre posiciones (funciona igual con o sin internet).
+- **Botón de brújula** (columna derecha): alterna *norte arriba* → *rumbo de marcha* → *vista libre*.
+- El motor de rutas ya calcula hasta 3 opciones (más rápida, más corta, alternativa); falta su pantalla de selección.
 
 ## Tu posición en el mapa
 Ajustes › Preferencias › *Tu posición en el mapa*: **punto, flecha, triángulo, auto o taxi**. Todos menos el punto giran hacia donde te mueves (parado, conservan la última dirección).

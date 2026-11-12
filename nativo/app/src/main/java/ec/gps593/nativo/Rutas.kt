@@ -79,8 +79,10 @@ class Ubic(val d: Double, val i: Int, val along: Double)
 /** Una ruta calculada: línea, distancia, duración y maniobras. */
 class Ruta(
     val lat: DoubleArray, val lon: DoubleArray, val distancia: Double, val duracion: Double,
-    val pasos: List<Paso>
+    val pasos: List<Paso>, val segs: IntArray = IntArray(0)
 ) {
+    /** Nombre de la opción ("Más rápida", "Más corta", "Alternativa"). */
+    var etiqueta = ""
     val acum = DoubleArray(lat.size)
     val total: Double
 
@@ -150,7 +152,7 @@ class Ruta(
 
 private class Ent(val s: Int, val dir: Int, val f0: Double, val f1: Double)
 private class Target(val extra: Double, val e: Ent)
-private class Pieza(val pts: List<DoubleArray>, val nombre: String, val len: Double, val time: Double, val n: Int)
+private class Pieza(val pts: List<DoubleArray>, val nombre: String, val len: Double, val time: Double, val n: Int, val s: Int)
 private class Snap(val s: Int, val d: Double, val u: Int, val t: Double) {
     var frac = 0.0
 }
@@ -366,13 +368,16 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
         return b
     }
 
-    private fun astar(starts: List<DoubleArray>, targets: HashMap<Int, Target>, gLat: Double, gLon: Double): Res? {
+    private fun astar(
+        starts: List<DoubleArray>, targets: HashMap<Int, Target>, gLat: Double, gLon: Double,
+        modo: Int, pen: BooleanArray?, factor: Double
+    ): Res? {
         val gS = DoubleArray(nN)
         gS.fill(Double.POSITIVE_INFINITY)
         val prev = IntArray(nN)
         prev.fill(-1)
         val heap = Heap()
-        fun h(n: Int): Double = Geo.dm(nlat.get(n) * 1e-6, nlon.get(n) * 1e-6, gLat, gLon) / VMAX
+        fun h(n: Int): Double = Geo.dm(nlat.get(n) * 1e-6, nlon.get(n) * 1e-6, gLat, gLon) / (if (modo == 1) 1.0 else VMAX)
         for (st in starts) {
             val n = st[0].toInt()
             val g = st[1]
@@ -401,7 +406,7 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
                 val s = e shr 2
                 val dir = (e shr 1) and 1
                 val m = if (dir == 1) sFrom.get(s) else sTo.get(s)
-                val ng = g0 + sTime.get(s)
+                val ng = g0 + (if (modo == 1) sDist.get(s).toDouble() else sTime.get(s).toDouble() * (if (pen != null && pen[s]) factor else 1.0))
                 if (ng < gS[m]) {
                     gS[m] = ng
                     prev[m] = s * 2 + dir
@@ -479,17 +484,24 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
         val p = cortar(segGeom(s, dir == 1), f0, f1)
         val k = f1 - f0
         val nombre = calles?.nombre(sName.get(s)) ?: ""
-        return Pieza(p, nombre, sDist.get(s).toDouble() * k, sTime.get(s).toDouble() * k, node)
+        return Pieza(p, nombre, sDist.get(s).toDouble() * k, sTime.get(s).toDouble() * k, node, s)
     }
 
     /** Calcula la ruta más rápida entre dos puntos. Lanza IOException con un mensaje claro si no se puede. */
-    fun ruta(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Ruta {
+    fun ruta(
+        fromLat: Double, fromLon: Double, toLat: Double, toLon: Double,
+        modo: Int = 0, pen: BooleanArray? = null, factor: Double = 1.0
+    ): Ruta {
         val a = snap(fromLat, fromLon) ?: throw IOException("Tu posición está fuera de la zona de los datos de rutas.")
         val b = snap(toLat, toLon) ?: throw IOException("El destino está fuera de la zona de los datos de rutas.")
         val fa = flags(a.s)
         val fb = flags(b.s)
-        val ta = sTime.get(a.s).toDouble()
-        val tb = sTime.get(b.s).toDouble()
+        // Costo de recorrer un tramo según el criterio: tiempo (con penalización opcional) o distancia
+        fun peso(s: Int): Double =
+            if (modo == 1) sDist.get(s).toDouble()
+            else sTime.get(s).toDouble() * (if (pen != null && pen[s]) factor else 1.0)
+        val ta = peso(a.s)
+        val tb = peso(b.s)
 
         val piezas = ArrayList<Pieza>()
         if (a.s == b.s && (((fa and 1) != 0 && b.frac >= a.frac) || ((fa and 2) != 0 && b.frac <= a.frac))) {
@@ -513,7 +525,7 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
                 val old = targets[sTo.get(b.s)]
                 if (old == null || x.extra < old.extra) targets[sTo.get(b.s)] = x
             }
-            val r = astar(starts, targets, toLat, toLon) ?: throw IOException("No hay ruta disponible entre esos puntos.")
+            val r = astar(starts, targets, toLat, toLon, modo, pen, factor) ?: throw IOException("No hay ruta disponible entre esos puntos.")
             val mid = ArrayList<IntArray>()
             var n = r.bestN
             while (true) {
@@ -587,7 +599,60 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
             dTot += p.len
             tTot += p.time
         }
-        return Ruta(la, lo, dTot, tTot, pasos)
+        val usados = IntArray(piezas.size)
+        for (i in piezas.indices) usados[i] = piezas[i].s
+        return Ruta(la, lo, dTot, tTot, pasos, usados)
+    }
+
+    /** Fracción (0 a 1) del largo de `a` que recorre los mismos tramos que `b`. */
+    private fun compartido(a: Ruta, b: Ruta): Double {
+        val en = HashSet<Int>()
+        for (s in b.segs) en.add(s)
+        var comun = 0.0
+        var total = 0.0
+        for (s in a.segs) {
+            val l = sDist.get(s).toDouble()
+            total += l
+            if (en.contains(s)) comun += l
+        }
+        return if (total > 0.0) comun / total else 1.0
+    }
+
+    /**
+     * Hasta tres opciones de ruta: la más rápida, la más corta y alternativas que evitan los tramos de la más rápida
+     * (se encarece su costo y se vuelve a calcular). Una alternativa solo se ofrece si es distinta y no mucho más lenta.
+     */
+    fun alternativas(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): List<Ruta> {
+        val rapida = ruta(fromLat, fromLon, toLat, toLon)
+        rapida.etiqueta = "Más rápida"
+        val out = ArrayList<Ruta>()
+        out.add(rapida)
+        try {
+            val corta = ruta(fromLat, fromLon, toLat, toLon, 1, null, 1.0)
+            if (corta.distancia < rapida.distancia * 0.97 && compartido(corta, rapida) < 0.97) {
+                corta.etiqueta = "Más corta"
+                out.add(corta)
+            }
+        } catch (e: IOException) { /* sin una opción más corta distinta */ }
+        for (factor in doubleArrayOf(2.5, 5.0)) {
+            if (out.size >= 3) break
+            try {
+                val pen = BooleanArray(nS)
+                for (s in rapida.segs) pen[s] = true
+                val alt = ruta(fromLat, fromLon, toLat, toLon, 0, pen, factor)
+                var parecida = compartido(alt, rapida) >= 0.8
+                for (o in out) {
+                    if (Math.max(compartido(alt, o), compartido(o, alt)) > 0.9) parecida = true
+                }
+                if (!parecida && alt.duracion <= rapida.duracion * 1.7) {
+                    var hayAlt = false
+                    for (o in out) if (o.etiqueta.startsWith("Alternativa")) hayAlt = true
+                    alt.etiqueta = if (hayAlt) "Alternativa 2" else "Alternativa"
+                    out.add(alt)
+                }
+            } catch (e: IOException) { /* no hay otra opción distinta */ }
+        }
+        return out
     }
 
     companion object {

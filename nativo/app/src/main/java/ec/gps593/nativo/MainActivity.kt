@@ -73,7 +73,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.8"
+private const val VERSION = "0.9"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
@@ -170,6 +170,22 @@ class MainActivity : Activity(), LocationListener {
     private var marcadorTipo = 1
     private var ultimoRumbo = 0f
 
+    // Movimiento suave de la posición y orientación de la vista
+    private var velMs = 0f
+    private var ultimaFix: Location? = null
+    private var posMostrada: DoubleArray? = null
+    private var rumboMostrado = 0f
+    private var animDesde = DoubleArray(2)
+    private var animHasta = DoubleArray(2)
+    private var animRumboDesde = 0f
+    private var animRumboHasta = 0f
+    private var animT0 = 0L
+    private var animDur = 1000L
+    private var animActiva = false
+    private var zoomObjetivo = 17.0
+    private var zoomActual = 15.0
+    private var rumboArriba = false          // true = el mapa gira con el rumbo; false = norte arriba
+
     // Posición de referencia de la última búsqueda (para mostrar distancias y ordenar por cercanía)
     private var refLat = Double.NaN
     private var refLon = Double.NaN
@@ -199,6 +215,7 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var tvBusqueda: TextView
     private lateinit var btnNoche: Icono
     private lateinit var btnCentrar: Icono
+    private lateinit var btnBrujula: Icono
     private lateinit var izqAbajo: LinearLayout
     private lateinit var derAbajo: LinearLayout
     private lateinit var pillBusqueda: LinearLayout
@@ -738,6 +755,9 @@ class MainActivity : Activity(), LocationListener {
 
         // ── Abajo a la derecha: zoom y centrar ──
         derAbajo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        btnBrujula = botonRedondo(R.drawable.ic_explore, 50) { alternarOrientacion() }
+        btnBrujula.activo = true
+        derAbajo.addView(btnBrujula)
         derAbajo.addView(botonRedondo(R.drawable.ic_add, 50) { map?.animateCamera(CameraUpdateFactory.zoomIn()) })
         derAbajo.addView(botonRedondo(R.drawable.ic_remove, 50) { map?.animateCamera(CameraUpdateFactory.zoomOut()) })
         btnCentrar = botonRedondo(R.drawable.ic_near_me, 62) { centrar() }
@@ -1265,6 +1285,7 @@ class MainActivity : Activity(), LocationListener {
         btnCentrar.destacado = follow
         btnCentrar.res = if (follow) R.drawable.ic_near_me else R.drawable.ic_my_location
         pintarBoton(btnCentrar)
+        actualizarBotonCentrar()
         for (i in iconos) i.invalidate()
         barraCopia.invalidate()
         if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
@@ -1353,6 +1374,39 @@ class MainActivity : Activity(), LocationListener {
         btnCentrar.destacado = follow
         btnCentrar.res = if (follow) R.drawable.ic_near_me else R.drawable.ic_my_location
         pintarBoton(btnCentrar)
+        // Brújula: vista libre (mano), norte arriba (brújula) o rumbo de marcha (flecha)
+        btnBrujula.res = if (!follow) R.drawable.ic_pan_tool else if (rumboArriba) R.drawable.ic_navigation else R.drawable.ic_explore
+        btnBrujula.activo = follow
+        btnBrujula.invalidate()
+    }
+
+    /** Alterna la vista: norte arriba → rumbo de marcha → vista libre → norte arriba… */
+    private fun alternarOrientacion() {
+        val msg: String
+        if (!follow) {
+            follow = true
+            rumboArriba = false
+            msg = "Norte arriba"
+        } else if (!rumboArriba) {
+            rumboArriba = true
+            msg = "Rumbo de marcha"
+        } else {
+            follow = false
+            rumboArriba = false
+            msg = "Vista libre"
+        }
+        actualizarBotonCentrar()
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        val m = map
+        val p = posMostrada
+        if (follow && p != null) {
+            dibujar(p[0], p[1], rumboMostrado)
+        } else if (!follow && m != null) {
+            m.animateCamera(
+                CameraUpdateFactory.newCameraPosition(CameraPosition.Builder(m.cameraPosition).bearing(0.0).tilt(0.0).build()),
+                400
+            )
+        }
     }
 
     private fun cargarEstilo() {
@@ -3091,49 +3145,138 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun ponerPosicion(l: Location?) {
-        if (l == null) return
-        // El rumbo solo se actualiza si te mueves; parado, el marcador conserva la última dirección
-        val moviendo = l.hasBearing() && (!l.hasSpeed() || l.speed > 0.8f)
-        if (moviendo) ultimoRumbo = l.bearing
-        val json = "{\"type\":\"Feature\",\"properties\":{\"rumbo\":$ultimoRumbo,\"icono\":\"marcador-$marcadorTipo\"}," +
-            "\"geometry\":{\"type\":\"Point\",\"coordinates\":[${l.longitude},${l.latitude}]}}"
-        estilo?.getSourceAs<GeoJsonSource>("yo")?.setGeoJson(json)
+        val p = posMostrada
+        if (p != null) pintarMarcador(p[0], p[1], rumboMostrado)
+        else if (l != null) pintarMarcador(l.latitude, l.longitude, ultimoRumbo)
     }
 
     override fun onLocationChanged(location: Location) {
         if (simulando) return                       // durante la simulación se ignora el GPS real
         val prov = location.provider ?: "?"
         contFix[prov] = (contFix[prov] ?: 0) + 1
-        val prev = lastLoc
-        // Si ya hay un GPS reciente, ignora la posición aproximada de la red
-        if (prev != null && prov == LocationManager.NETWORK_PROVIDER &&
-            prev.provider == LocationManager.GPS_PROVIDER && edadSeg(prev) < 15L
-        ) return
+        if (!aceptarFix(location)) return
         procesarUbicacion(location)
+    }
+
+    /**
+     * Elige la mejor posición: el GPS manda. La red, el proveedor fusionado y el pasivo solo se aceptan cuando no hay un GPS
+     * reciente (si no, sus posiciones sin velocidad ni rumbo hacían que el cursor se trabara y el velocímetro quedara en 0).
+     */
+    private fun aceptarFix(l: Location): Boolean {
+        val prev = lastLoc ?: return true
+        if (esSintetica(prev)) return true
+        val esGps = l.provider == LocationManager.GPS_PROVIDER
+        val prevGps = prev.provider == LocationManager.GPS_PROVIDER
+        val edadPrev = edadSeg(prev)
+        if (!esGps && prevGps && edadPrev < 8L) return false                         // hay GPS reciente
+        if (l.elapsedRealtimeNanos < prev.elapsedRealtimeNanos) return false          // llegó desordenada
+        if (!esGps && l.hasAccuracy() && prev.hasAccuracy() && l.accuracy > prev.accuracy * 1.5f && edadPrev < 10L) return false
+        return true
     }
 
     /** Punto único por donde pasa toda posición (GPS real, de prueba o simulada). */
     private fun procesarUbicacion(location: Location) {
+        val prev = ultimaFix
+        val sint = esSintetica(location)
+        var v = -1f
+        var dtFix = 1000L
+        var rumbo = ultimoRumbo
+        if (prev != null && !esSintetica(prev) && !sint) {
+            val dt = (location.elapsedRealtimeNanos - prev.elapsedRealtimeNanos) / 1e9
+            if (dt > 0.0) dtFix = (dt * 1000.0).toLong()
+            if (dt > 0.4 && dt < 8.0) {
+                val d = Geo.dm(prev.latitude, prev.longitude, location.latitude, location.longitude)
+                val ruido = if (location.hasAccuracy()) Math.max(3f, location.accuracy) else 10f
+                // Velocidad: la del GPS si la trae; si no, se calcula con lo que avanzaste
+                v = if (location.provider == LocationManager.GPS_PROVIDER && location.hasSpeed()) location.speed
+                else if (d > ruido * 0.5) (d / dt).toFloat() else 0f
+                if (d > 6.0 && d > ruido * 0.6) {
+                    rumbo = Geo.rumbo(prev.latitude, prev.longitude, location.latitude, location.longitude).toFloat()
+                }
+            }
+        }
+        if (v < 0f) v = if (location.hasSpeed()) location.speed else 0f
+        if (location.hasBearing() && v > 0.8f && (location.provider == LocationManager.GPS_PROVIDER || sint)) rumbo = location.bearing
+        if (sint && location.hasBearing()) rumbo = location.bearing
+        velMs = if (v < 0.3f) 0f else if (sint) v else velMs * 0.3f + v * 0.7f
+        if (v >= 0.8f || sint) ultimoRumbo = rumbo
+        ultimaFix = location
         lastLoc = location
-        ponerPosicion(location)
         actualizarVelocidad()
-        if (modoRuta == 2) actualizarNavegacion(location)
+        if (modoRuta == 2) {
+            val kmh = velMs * 3.6f
+            zoomObjetivo = if (kmh < 25f) 17.4 else if (kmh < 60f) 16.6 else 15.8
+            actualizarNavegacion(location)
+        }
+        programarAnimacion(location.latitude, location.longitude, ultimoRumbo, dtFix)
+    }
+
+    /** Mueve el marcador (y la cámara si la vista te sigue) con una transición suave hacia la nueva posición. */
+    private fun programarAnimacion(lat: Double, lon: Double, rumbo: Float, dtFix: Long) {
+        val actual = posMostrada
+        if (actual == null || Geo.dm(actual[0], actual[1], lat, lon) > 300.0) {
+            // Primera posición o salto grande: sin animar
+            posMostrada = doubleArrayOf(lat, lon)
+            rumboMostrado = rumbo
+            val m = map
+            if (!primerFix && follow && m != null) {
+                primerFix = true
+                m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 15.0))
+            }
+            dibujar(lat, lon, rumbo)
+            return
+        }
+        animDesde = doubleArrayOf(actual[0], actual[1])
+        animHasta = doubleArrayOf(lat, lon)
+        animRumboDesde = rumboMostrado
+        animRumboHasta = rumbo
+        animT0 = SystemClock.uptimeMillis()
+        animDur = Math.max(450L, Math.min(1300L, dtFix))
+        if (!animActiva) {
+            animActiva = true
+            ui.post(animTick)
+        }
+    }
+
+    private val animTick = object : Runnable {
+        override fun run() {
+            val t = Math.min(1.0, (SystemClock.uptimeMillis() - animT0).toDouble() / animDur.toDouble())
+            val lat = animDesde[0] + (animHasta[0] - animDesde[0]) * t
+            val lon = animDesde[1] + (animHasta[1] - animDesde[1]) * t
+            val dr = ((animRumboHasta - animRumboDesde + 540f) % 360f) - 180f
+            val rumbo = (animRumboDesde + dr * t.toFloat() + 360f) % 360f
+            posMostrada = doubleArrayOf(lat, lon)
+            rumboMostrado = rumbo
+            dibujar(lat, lon, rumbo)
+            if (t < 1.0) ui.postDelayed(this, 50L) else animActiva = false
+        }
+    }
+
+    private fun pintarMarcador(lat: Double, lon: Double, rumbo: Float) {
+        val json = "{\"type\":\"Feature\",\"properties\":{\"rumbo\":$rumbo,\"icono\":\"marcador-$marcadorTipo\"}," +
+            "\"geometry\":{\"type\":\"Point\",\"coordinates\":[$lon,$lat]}}"
+        estilo?.getSourceAs<GeoJsonSource>("yo")?.setGeoJson(json)
+    }
+
+    /** Dibuja el marcador y, si la vista te sigue, centra la cámara (con el rumbo y la inclinación si corresponde). */
+    private fun dibujar(lat: Double, lon: Double, rumbo: Float) {
+        pintarMarcador(lat, lon, rumbo)
         val m = map ?: return
         if (!follow) return
-        val ll = LatLng(location.latitude, location.longitude)
+        var z = m.cameraPosition?.zoom ?: 15.0
         if (modoRuta == 2) {
-            // Cámara de conducción: sigue tu posición, gira hacia donde avanzas y se aleja con la velocidad
-            val kmh = if (location.hasSpeed()) location.speed * 3.6f else 0f
-            val zoom = if (kmh < 25f) 17.4 else if (kmh < 60f) 16.6 else 15.8
-            val b = CameraPosition.Builder().target(ll).zoom(zoom).tilt(if (inclinado) 45.0 else 0.0)
-            if (location.hasBearing() && location.speed > 1.5f) b.bearing(location.bearing.toDouble())
-            m.animateCamera(CameraUpdateFactory.newCameraPosition(b.build()), 900)
-        } else if (!primerFix) {
-            primerFix = true
-            m.animateCamera(CameraUpdateFactory.newLatLngZoom(ll, 15.0))
-        } else {
-            m.animateCamera(CameraUpdateFactory.newLatLng(ll), 900)
+            zoomActual += (zoomObjetivo - zoomActual) * 0.12
+            z = zoomActual
         }
+        val b = CameraPosition.Builder().target(LatLng(lat, lon)).zoom(z)
+        if (rumboArriba) {
+            b.bearing(rumbo.toDouble())
+            b.tilt(if (inclinado) 45.0 else 0.0)
+        } else {
+            b.bearing(0.0)
+            b.tilt(0.0)
+        }
+        m.moveCamera(CameraUpdateFactory.newCameraPosition(b.build()))
     }
 
     // Se declaran todos para que funcione también en Android antiguos (métodos abstractos antes de API 30)
@@ -3237,6 +3380,9 @@ class MainActivity : Activity(), LocationListener {
         val r = ruta ?: return
         modoRuta = 2
         follow = true
+        rumboArriba = true
+        zoomActual = map?.cameraPosition?.zoom ?: 15.0
+        zoomObjetivo = 17.0
         actualizarBotonCentrar()
         fueraCont = 0
         idxRuta = 0
@@ -3251,12 +3397,6 @@ class MainActivity : Activity(), LocationListener {
         val l = lastLoc
         if (l != null) {
             actualizarNavegacion(l)
-            val m = map
-            if (m != null) {
-                val b = CameraPosition.Builder(m.cameraPosition).target(LatLng(l.latitude, l.longitude)).zoom(17.0)
-                    .tilt(if (inclinado) 45.0 else 0.0)
-                m.animateCamera(CameraUpdateFactory.newCameraPosition(b.build()), 700)
-            }
         }
     }
 
@@ -3366,6 +3506,7 @@ class MainActivity : Activity(), LocationListener {
 
     /** Quita la ruta y vuelve a la pantalla normal (sin tocar el destino). */
     private fun cancelarRuta() {
+        rumboArriba = false
         simulando = false
         ui.removeCallbacks(simTick)
         ruta = null
@@ -3476,7 +3617,7 @@ class MainActivity : Activity(), LocationListener {
                 msg = if (acc >= 0) "Ubicación aprox. ±$acc m" else "Ubicación aproximada"
             }
         }
-        val kmh = if (l != null && (edad <= 5 || esSintetica(l)) && l.hasSpeed()) Math.round(l.speed * 3.6f) else 0
+        val kmh = if (l != null && (edad <= 5 || esSintetica(l))) Math.round(velMs * 3.6f) else 0
         tvVelocidad.text = kmh.toString()
         tvGps.text = msg
         (puntoGps.background as? GradientDrawable)?.setColor(color)
