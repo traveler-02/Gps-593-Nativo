@@ -22,7 +22,7 @@ import java.util.Locale
 /** Un lugar encontrado (población, calle, comercio, servicio…). */
 class Resultado(
     val nombre: String, val lat: Double, val lon: Double, val tipo: Int,
-    val detalle: String = "", val categoria: String = "", val origen: String = ""
+    val detalle: String = "", val categoria: String = "", val origen: String = "", val lista: String = ""
 ) {
     fun tipoTexto(): String = if (categoria.isNotEmpty()) categoria else when (tipo) {
         0 -> "Ciudad"

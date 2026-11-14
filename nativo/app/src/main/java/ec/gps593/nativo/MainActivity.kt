@@ -73,7 +73,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "0.9"
+private const val VERSION = "1.0"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
@@ -145,6 +145,10 @@ class MainActivity : Activity(), LocationListener {
     private var ruta: Ruta? = null
     private var modoRuta = 0                  // 0 sin ruta, 1 vista previa, 2 navegando
     private var calculando = false
+    private var rutasAlt: List<Ruta> = emptyList()      // opciones de ruta de la vista previa
+    private var idxSel = 0
+    private var autoIniciar = false                     // empezar a navegar apenas se calcule la ruta
+    private val etiquetasSub = ArrayList<TextView>()
     private var pasoAnunciado = IntArray(0)
     private var fueraCont = 0
     private var idxRuta = 0
@@ -225,7 +229,13 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var tvNavTexto: TextView
     private lateinit var barraNav: LinearLayout
     private lateinit var tvNavEta: TextView
-    private lateinit var tvNavResto: TextView
+    private lateinit var tvNavDistR: TextView
+    private lateinit var tvNavTiempo: TextView
+    private lateinit var barraProgreso: Barra
+    private lateinit var filaAlt: LinearLayout
+    private lateinit var etDlg2: EditText
+    private lateinit var scrollDlgListas: HorizontalScrollView
+    private lateinit var filaDlgListas: LinearLayout
     private lateinit var btnPrimario: TextView
     private lateinit var btnSimular: TextView
     private lateinit var btnDescargar: TextView
@@ -804,6 +814,12 @@ class MainActivity : Activity(), LocationListener {
         cerrar.setOnClickListener { ocultarLugar() }
         arriba.addView(cerrar)
         tarjetaLugar.addView(arriba)
+        filaAlt = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(12), 0, 0)
+            visibility = View.GONE
+        }
+        tarjetaLugar.addView(filaAlt)
 
         val abajo = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -827,23 +843,50 @@ class MainActivity : Activity(), LocationListener {
         })
     }
 
+    private fun columnaDato(etiqueta: String, valor: TextView): LinearLayout {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val e = texto(11.5f, "sans-serif-medium").apply {
+            text = etiqueta
+            letterSpacing = 0.08f
+        }
+        etiquetasSub.add(e)
+        col.addView(e)
+        valor.setPadding(0, dp(2), 0, 0)
+        col.addView(valor)
+        return col
+    }
+
+    /** Panel inferior durante la navegación: avance de la ruta, hora de llegada, distancia y tiempo restantes. */
     private fun crearBarraNav() {
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+        val mw = ViewGroup.LayoutParams.MATCH_PARENT
         barraNav = tarjeta(26).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(12), dp(14), dp(12))
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(16), dp(12))
             visibility = View.GONE
         }
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        tvNavEta = texto(22f, "sans-serif-medium")
-        tvNavResto = texto(12.5f).apply { setPadding(0, dp(3), 0, 0) }
-        col.addView(tvNavEta)
-        col.addView(tvNavResto)
-        barraNav.addView(col, LinearLayout.LayoutParams(0, wc, 1f))
+        barraProgreso = Barra(this)
+        barraNav.addView(barraProgreso, LinearLayout.LayoutParams(mw, dp(6)))
+        tvNavEta = texto(21f, "sans-serif-medium")
+        tvNavDistR = texto(21f, "sans-serif-medium")
+        tvNavTiempo = texto(21f, "sans-serif-medium")
+        val datos = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(12), 0, 0)
+        }
+        datos.addView(columnaDato("LLEGADA", tvNavEta), LinearLayout.LayoutParams(0, wc, 1f))
+        datos.addView(columnaDato("DISTANCIA", tvNavDistR), LinearLayout.LayoutParams(0, wc, 1f))
+        datos.addView(columnaDato("TIEMPO", tvNavTiempo), LinearLayout.LayoutParams(0, wc, 1f))
+        barraNav.addView(datos)
+        val acciones = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(10), 0, 0)
+        }
         btnSimular = botonTexto("Simular", false) { alternarSimulacion() }
-        barraNav.addView(btnSimular, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(8) })
-        barraNav.addView(botonTexto("Salir", true) { finalizarNavegacion(false) })
+        acciones.addView(btnSimular, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(8) })
+        acciones.addView(botonTexto("Salir", true) { finalizarNavegacion(false) })
+        barraNav.addView(acciones)
         raiz.addView(barraNav, FrameLayout.LayoutParams(dp(480), wc, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
             bottomMargin = dp(24)
         })
@@ -935,6 +978,24 @@ class MainActivity : Activity(), LocationListener {
                 true
             }
         }
+        etDlg2 = EditText(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f * escala)
+            hint = "Lista (por ejemplo: Restaurantes)"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setOnEditorActionListener { _, _, _ ->
+                btnDlgOk.performClick()
+                true
+            }
+        }
+        filaDlgListas = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        scrollDlgListas = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, dp(10), 0, 0)
+        }
+        scrollDlgListas.addView(filaDlgListas)
         val filaBtns = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
@@ -942,6 +1003,7 @@ class MainActivity : Activity(), LocationListener {
         btnDlgCancel = botonTexto("Cancelar", false) { cerrarDialogo() }
         btnDlgOk = botonTexto("Guardar", true) {
             val t = etDlg.text.toString().trim()
+            dlgListaTexto = etDlg2.text.toString().trim()
             val cb = dlgOk
             val cat = dlgCat
             cerrarDialogo()
@@ -953,6 +1015,8 @@ class MainActivity : Activity(), LocationListener {
         cardDlg.addView(tvDlgTexto)
         cardDlg.addView(filaDlgChips)
         cardDlg.addView(etDlg, LinearLayout.LayoutParams(mw, wc).apply { topMargin = dp(14) })
+        cardDlg.addView(etDlg2, LinearLayout.LayoutParams(mw, wc).apply { topMargin = dp(10) })
+        cardDlg.addView(scrollDlgListas, LinearLayout.LayoutParams(mw, wc))
         cardDlg.addView(filaBtns, LinearLayout.LayoutParams(mw, wc).apply { topMargin = dp(18) })
         panelDialogo.addView(cardDlg, FrameLayout.LayoutParams(dp(520), wc, Gravity.CENTER))
         raiz.addView(panelDialogo, FrameLayout.LayoutParams(mw, mw))
@@ -963,6 +1027,8 @@ class MainActivity : Activity(), LocationListener {
     private var dlgCats: List<String>? = null
     private var dlgCampoSoloFav = false
     private var dlgTieneCampo = false
+    private var dlgListaInicial: String? = null
+    private var dlgListaTexto = ""
 
     private fun actualizarDialogo() {
         filaDlgChips.removeAllViews()
@@ -984,12 +1050,31 @@ class MainActivity : Activity(), LocationListener {
             }
         }
         etDlg.visibility = if (!dlgTieneCampo || (dlgCampoSoloFav && dlgCat != 0)) View.GONE else View.VISIBLE
+        val verLista = dlgListaInicial != null && dlgTieneCampo && (!dlgCampoSoloFav || dlgCat == 0)
+        etDlg2.visibility = if (verLista) View.VISIBLE else View.GONE
+        scrollDlgListas.visibility = if (verLista) View.VISIBLE else View.GONE
+        if (verLista) {
+            filaDlgListas.removeAllViews()
+            val actual = etDlg2.text.toString().trim()
+            for (n in leerListas()) {
+                filaDlgListas.addView(
+                    chip(n, n == actual) {
+                        etDlg2.setText(n)
+                        etDlg2.setSelection(n.length)
+                        actualizarDialogo()
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        rightMargin = dp(8)
+                    }
+                )
+            }
+        }
     }
 
-    /** Muestra un diálogo con título, texto, campo opcional y categorías opcionales. */
+    /** Muestra un diálogo con título, texto, campo opcional, categorías opcionales y lista opcional. */
     private fun mostrarDialogo(
         titulo: String, texto: String, campo: String?, categorias: List<String>?,
-        textoOk: String, campoSoloFav: Boolean = false, ok: (String, Int) -> Unit
+        textoOk: String, campoSoloFav: Boolean = false, listaInicial: String? = null, ok: (String, Int) -> Unit
     ) {
         tvDlgTitulo.text = titulo
         tvDlgTexto.text = texto
@@ -998,8 +1083,11 @@ class MainActivity : Activity(), LocationListener {
         dlgCat = 0
         dlgCampoSoloFav = campoSoloFav
         dlgTieneCampo = campo != null
+        dlgListaInicial = listaInicial
+        dlgListaTexto = listaInicial ?: ""
         etDlg.setText(campo ?: "")
         etDlg.setSelection(etDlg.text.length)
+        etDlg2.setText(listaInicial ?: "")
         btnDlgOk.text = textoOk
         dlgOk = ok
         actualizarDialogo()
@@ -1266,12 +1354,21 @@ class MainActivity : Activity(), LocationListener {
             cornerRadius = dp(26).toFloat()
         }
         tvNavEta.setTextColor(pal.texto)
-        tvNavResto.setTextColor(pal.sub)
+        tvNavDistR.setTextColor(pal.texto)
+        tvNavTiempo.setTextColor(pal.texto)
+        for (e in etiquetasSub) e.setTextColor(pal.sub)
         etBusqueda.setTextColor(pal.texto)
         etBusqueda.setHintTextColor(pal.sub)
         etDlg.setTextColor(pal.texto)
         etDlg.setHintTextColor(pal.sub)
         etDlg.background = GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setColor(pal.fondoClaro)
+            setStroke(dp(1), pal.borde)
+        }
+        etDlg2.setTextColor(pal.texto)
+        etDlg2.setHintTextColor(pal.sub)
+        etDlg2.background = GradientDrawable().apply {
             cornerRadius = dp(16).toFloat()
             setColor(pal.fondoClaro)
             setStroke(dp(1), pal.borde)
@@ -2058,6 +2155,7 @@ class MainActivity : Activity(), LocationListener {
             if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
             return
         }
+        registrarReciente(r)
         if (modoRuta != 0) cancelarRuta()
         if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
         if (panelAjustes.visibility == View.VISIBLE) cerrarAjustes()
@@ -2089,51 +2187,44 @@ class MainActivity : Activity(), LocationListener {
         estilo?.getSourceAs<GeoJsonSource>("destino")?.setGeoJson(json)
     }
 
-    // ───────────────────────── lugares guardados: favoritos, casa y trabajo ─────────────────────────
+    // ───────────────────────── lugares guardados: listas, casa/trabajo, recientes y rutas frecuentes ─────────────────────────
 
     private fun etiquetaLugar(clave: String): String = if (clave == "casa") "Casa" else "Trabajo"
 
-    private fun leerFavs(): MutableList<Resultado> {
+    private fun aJson(r: Resultado): JSONObject =
+        JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo)
+            .put("d", r.detalle).put("c", r.categoria).put("l", r.lista)
+
+    private fun deJson(o: JSONObject): Resultado =
+        Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6), o.optString("d", ""), o.optString("c", ""), "", o.optString("l", ""))
+
+    private fun leerArray(clave: String): MutableList<Resultado> {
         val out = ArrayList<Resultado>()
         try {
-            val a = JSONArray(prefs.getString("favs", "[]"))
-            for (i in 0 until a.length()) {
-                val o = a.getJSONObject(i)
-                out.add(Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6), o.optString("d", "")))
-            }
+            val a = JSONArray(prefs.getString(clave, "[]"))
+            for (i in 0 until a.length()) out.add(deJson(a.getJSONObject(i)))
         } catch (e: Exception) { /* lista vacía */ }
         return out
     }
 
-    private fun guardarFavs(l: List<Resultado>) {
+    private fun guardarArray(clave: String, l: List<Resultado>) {
         val a = JSONArray()
-        for (r in l) {
-            a.put(JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo).put("d", r.detalle))
-        }
-        prefs.edit().putString("favs", a.toString()).apply()
+        for (r in l) a.put(aJson(r))
+        prefs.edit().putString(clave, a.toString()).apply()
     }
+
+    private fun leerFavs(): MutableList<Resultado> = leerArray("favs")
+    private fun guardarFavs(l: List<Resultado>) = guardarArray("favs", l)
 
     /** Casa o trabajo ("casa" / "trabajo"), o null si no está definido. */
     private fun leerLugar(clave: String): Resultado? {
         val s = prefs.getString("lug_$clave", null) ?: return null
-        return try {
-            val o = JSONObject(s)
-            Resultado(o.getString("n"), o.getDouble("la"), o.getDouble("lo"), o.optInt("t", 6), o.optString("d", ""))
-        } catch (e: Exception) {
-            null
-        }
+        return try { deJson(JSONObject(s)) } catch (e: Exception) { null }
     }
 
     private fun guardarLugar(clave: String, r: Resultado?) {
         val e = prefs.edit()
-        if (r == null) {
-            e.remove("lug_$clave")
-        } else {
-            e.putString(
-                "lug_$clave",
-                JSONObject().put("n", r.nombre).put("la", r.lat).put("lo", r.lon).put("t", r.tipo).put("d", r.detalle).toString()
-            )
-        }
+        if (r == null) e.remove("lug_$clave") else e.putString("lug_$clave", aJson(r).toString())
         e.apply()
     }
 
@@ -2148,6 +2239,174 @@ class MainActivity : Activity(), LocationListener {
         return trabajo != null && mismoLugar(trabajo, d)
     }
 
+    // ── listas (carpetas) de favoritos ──
+
+    private fun listaDe(r: Resultado): String = r.lista.ifEmpty { "Favoritos" }
+
+    private fun leerListas(): MutableList<String> {
+        val out = ArrayList<String>()
+        out.add("Favoritos")
+        try {
+            val a = JSONArray(prefs.getString("listas", "[]"))
+            for (i in 0 until a.length()) {
+                val n = a.getString(i)
+                if (n.isNotEmpty() && !out.contains(n)) out.add(n)
+            }
+        } catch (e: Exception) { /* solo la lista por defecto */ }
+        for (f in leerFavs()) {
+            val n = listaDe(f)
+            if (!out.contains(n)) out.add(n)
+        }
+        return out
+    }
+
+    private fun guardarListas(l: List<String>) {
+        val a = JSONArray()
+        for (n in l) if (n != "Favoritos") a.put(n)
+        prefs.edit().putString("listas", a.toString()).apply()
+    }
+
+    private fun asegurarLista(n: String) {
+        val l = leerListas()
+        if (!l.contains(n)) {
+            l.add(n)
+            guardarListas(l)
+        }
+    }
+
+    private fun crearLista(n: String) {
+        if (n.isEmpty()) return
+        asegurarLista(n)
+        aviso("Lista «$n» creada")
+        refrescarAjustes()
+    }
+
+    private fun renombrarLista(viejo: String, nuevo: String) {
+        if (nuevo.isEmpty() || nuevo == viejo || viejo == "Favoritos") return
+        val l = leerListas()
+        val i = l.indexOf(viejo)
+        if (i >= 0) l[i] = nuevo
+        guardarListas(l)
+        val favs = leerFavs()
+        for (k in favs.indices) {
+            val f = favs[k]
+            if (listaDe(f) == viejo) favs[k] = Resultado(f.nombre, f.lat, f.lon, f.tipo, f.detalle, f.categoria, "", nuevo)
+        }
+        guardarFavs(favs)
+        refrescarAjustes()
+    }
+
+    /** Borra la lista; sus lugares pasan a "Favoritos" (no se pierde ninguno). */
+    private fun borrarLista(n: String) {
+        if (n == "Favoritos") return
+        val favs = leerFavs()
+        for (k in favs.indices) {
+            val f = favs[k]
+            if (listaDe(f) == n) favs[k] = Resultado(f.nombre, f.lat, f.lon, f.tipo, f.detalle, f.categoria, "", "Favoritos")
+        }
+        guardarFavs(favs)
+        val l = leerListas()
+        l.remove(n)
+        guardarListas(l)
+        refrescarAjustes()
+    }
+
+    // ── búsquedas recientes ──
+
+    private fun registrarReciente(r: Resultado) {
+        if (r.tipo == 99 && r.nombre.startsWith("Punto")) return
+        val l = leerArray("hist_busq")
+        l.removeAll { mismoLugar(it, r) }
+        l.add(0, Resultado(r.nombre, r.lat, r.lon, r.tipo, r.detalle, r.categoria))
+        while (l.size > 15) l.removeAt(l.size - 1)
+        guardarArray("hist_busq", l)
+    }
+
+    private fun borrarRecientes() {
+        prefs.edit().remove("hist_busq").apply()
+        refrescarAjustes()
+        if (panelBusqueda.visibility == View.VISIBLE) mostrarResultados(emptyList(), "", "")
+    }
+
+    // ── rutas frecuentes ──
+
+    private class RutaHist(val dest: Resultado, var veces: Int, var ultima: Long, var dist: Double, var dur: Double)
+
+    private fun leerRutasHist(): MutableList<RutaHist> {
+        val out = ArrayList<RutaHist>()
+        try {
+            val a = JSONArray(prefs.getString("hist_rutas", "[]"))
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                out.add(RutaHist(deJson(o.getJSONObject("r")), o.optInt("v", 1), o.optLong("u", 0L), o.optDouble("d", 0.0), o.optDouble("t", 0.0)))
+            }
+        } catch (e: Exception) { /* sin historial */ }
+        return out
+    }
+
+    private fun guardarRutasHist(l: List<RutaHist>) {
+        val a = JSONArray()
+        for (h in l) {
+            a.put(JSONObject().put("r", aJson(h.dest)).put("v", h.veces).put("u", h.ultima).put("d", h.dist).put("t", h.dur))
+        }
+        prefs.edit().putString("hist_rutas", a.toString()).apply()
+    }
+
+    /** Anota que empezaste una ruta a este destino (suma una vez más si ya la habías usado). */
+    private fun registrarRuta(dest: Resultado, r: Ruta) {
+        val l = leerRutasHist()
+        val ya = l.firstOrNull { Geo.dm(it.dest.lat, it.dest.lon, dest.lat, dest.lon) < 100.0 }
+        if (ya != null) {
+            ya.veces += 1
+            ya.ultima = System.currentTimeMillis()
+            ya.dist = r.distancia
+            ya.dur = r.duracion
+        } else {
+            l.add(RutaHist(Resultado(dest.nombre, dest.lat, dest.lon, dest.tipo, dest.detalle, dest.categoria), 1, System.currentTimeMillis(), r.distancia, r.duracion))
+        }
+        l.sortWith(compareByDescending<RutaHist> { it.ultima })
+        while (l.size > 30) l.removeAt(l.size - 1)
+        guardarRutasHist(l)
+    }
+
+    private fun rutasFrecuentes(max: Int): List<RutaHist> {
+        val l = leerRutasHist()
+        l.sortWith(compareByDescending<RutaHist> { it.veces }.thenByDescending { it.ultima })
+        return l.take(max)
+    }
+
+    private fun borrarRutasHist() {
+        prefs.edit().remove("hist_rutas").apply()
+        refrescarAjustes()
+        if (panelBusqueda.visibility == View.VISIBLE) mostrarResultados(emptyList(), "", "")
+    }
+
+    private fun fechaCorta(ms: Long): String {
+        if (ms <= 0L) return ""
+        val dia = 86_400_000L
+        val hoy = System.currentTimeMillis() / dia
+        val d = ms / dia
+        return when {
+            d == hoy -> "hoy"
+            d == hoy - 1 -> "ayer"
+            else -> java.text.SimpleDateFormat("d MMM", Locale("es")).format(java.util.Date(ms))
+        }
+    }
+
+    /** Calcula la ruta desde donde estás hasta `r` y empieza a navegar sin pasar por la vista previa. */
+    private fun irDirecto(r: Resultado) {
+        if (panelAjustes.visibility == View.VISIBLE) {
+            panelAjustes.visibility = View.GONE
+            tvDiagAcerca = null
+            barraTab = null
+            tvTabInstal = null
+        }
+        if (panelBusqueda.visibility == View.VISIBLE) cerrarBusqueda()
+        seleccionarResultado(r)
+        autoIniciar = true
+        calcularRuta(r)
+    }
+
     private fun actualizarEstrella() {
         val d = destino
         val guardado = d != null && esGuardado(d)
@@ -2156,7 +2415,7 @@ class MainActivity : Activity(), LocationListener {
         btnFav.invalidate()
     }
 
-    /** ☆: si el lugar no está guardado abre el diálogo para nombrarlo; si ya lo está, lo quita. */
+    /** ☆: si el lugar no está guardado abre el diálogo para nombrarlo y elegir lista; si ya lo está, lo quita. */
     private fun alternarFavorito() {
         val d = destino ?: return
         if (esGuardado(d)) {
@@ -2172,7 +2431,7 @@ class MainActivity : Activity(), LocationListener {
             if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
         } else {
             val base = if (d.detalle.isNotEmpty()) d.detalle else d.nombre
-            mostrarDialogo("Guardar lugar", "", base, listOf("Favorito", "Casa", "Trabajo"), "Guardar", true) { nombre, cat ->
+            mostrarDialogo("Guardar lugar", "", base, listOf("Favorito", "Casa", "Trabajo"), "Guardar", true, "Favoritos") { nombre, cat ->
                 guardarComo(d, cat, nombre)
             }
         }
@@ -2187,29 +2446,33 @@ class MainActivity : Activity(), LocationListener {
                 aviso("Guardado como ${etiquetaLugar(clave)}")
             }
             else -> {
+                val lista = dlgListaTexto.ifEmpty { "Favoritos" }
+                asegurarLista(lista)
                 val l = leerFavs()
                 l.removeAll { mismoLugar(it, d) }
                 val nom = if (nombre.isNotEmpty()) nombre else original
-                l.add(0, Resultado(nom, d.lat, d.lon, d.tipo, original))
+                l.add(0, Resultado(nom, d.lat, d.lon, d.tipo, original, d.categoria, "", lista))
                 guardarFavs(l)
-                aviso("Guardado en favoritos como «$nom»")
+                aviso("Guardado en «$lista» como «$nom»")
             }
         }
         actualizarEstrella()
         if (panelAjustes.visibility == View.VISIBLE) refrescarAjustes()
     }
 
-    private fun renombrarFav(f: Resultado, nuevo: String) {
+    private fun renombrarFav(f: Resultado, nuevo: String, lista: String) {
         val l = leerFavs()
         val i = l.indexOfFirst { mismoLugar(it, f) }
-        if (i >= 0 && nuevo.isNotEmpty()) {
-            l[i] = Resultado(nuevo, f.lat, f.lon, f.tipo, f.detalle)
+        if (i >= 0) {
+            val lst = lista.ifEmpty { "Favoritos" }
+            asegurarLista(lst)
+            l[i] = Resultado(if (nuevo.isNotEmpty()) nuevo else f.nombre, f.lat, f.lon, f.tipo, f.detalle, f.categoria, "", lst)
             guardarFavs(l)
         }
         refrescarAjustes()
     }
 
-    /** Lugares guardados cuyo nombre (o dirección) contiene lo que se escribe en la búsqueda. */
+    /** Lugares guardados cuyo nombre, dirección o lista contienen lo que se escribe en la búsqueda. */
     private fun coincidenciasGuardadas(q: String): List<Resultado> {
         val nq = Texto.norm(q).trim()
         val out = ArrayList<Resultado>()
@@ -2219,7 +2482,7 @@ class MainActivity : Activity(), LocationListener {
             if (Texto.norm(p.nombre).contains(nq) || Texto.norm(p.detalle).contains(nq)) out.add(p)
         }
         for (f in leerFavs()) {
-            if (Texto.norm(f.nombre).contains(nq) || Texto.norm(f.detalle).contains(nq)) out.add(f)
+            if (Texto.norm(f.nombre).contains(nq) || Texto.norm(f.detalle).contains(nq) || Texto.norm(listaDe(f)).contains(nq)) out.add(f)
         }
         return out
     }
@@ -2277,7 +2540,29 @@ class MainActivity : Activity(), LocationListener {
         return fila
     }
 
-    /** Atajos al abrir la búsqueda: casa, trabajo y favoritos (o "usar mi ubicación" si se está definiendo uno). */
+    private fun encabezado(titulo: String, accion: String?, onAccion: () -> Unit): LinearLayout {
+        val pal = paleta()
+        val f = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(2))
+        }
+        f.addView(txt(11.5f, "sans-serif-medium", pal.sub).apply {
+            text = titulo
+            letterSpacing = 0.1f
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (accion != null) {
+            f.addView(txt(12.5f, "sans-serif-medium", pal.acento).apply {
+                text = accion
+                isClickable = true
+                setPadding(dp(8), dp(4), 0, dp(4))
+                setOnClickListener { onAccion() }
+            })
+        }
+        return f
+    }
+
+    /** Atajos al abrir la búsqueda: casa, trabajo, rutas frecuentes, recientes y favoritos. */
     private fun agregarAtajos(pal: Paleta) {
         val dfn = definiendo
         if (dfn != null) {
@@ -2303,19 +2588,27 @@ class MainActivity : Activity(), LocationListener {
                 }
             )
         }
+        val rutas = rutasFrecuentes(3)
+        if (rutas.isNotEmpty()) {
+            listaResultados.addView(encabezado("RUTAS FRECUENTES", "Borrar") { borrarRutasHist() })
+            for (h in rutas) {
+                val sub = (if (h.veces > 1) "${h.veces} veces" else "1 vez") + " · " + Geo.dist(h.dist) + " · " + fechaCorta(h.ultima)
+                listaResultados.addView(filaAtajo(R.drawable.ic_directions, h.dest.nombre, sub, pal.acento) { irDirecto(h.dest) })
+            }
+        }
+        val rec = leerArray("hist_busq")
+        if (rec.isNotEmpty()) {
+            listaResultados.addView(encabezado("BÚSQUEDAS RECIENTES", "Borrar") { borrarRecientes() })
+            for (r in rec.take(6)) {
+                listaResultados.addView(filaAtajo(R.drawable.ic_history, r.nombre, r.tipoTexto(), pal.sub) { seleccionarResultado(r) })
+            }
+        }
         val favs = leerFavs()
         if (favs.isNotEmpty()) {
-            val t = txt(11.5f, "sans-serif-medium", pal.sub)
-            t.text = "FAVORITOS"
-            t.letterSpacing = 0.1f
-            t.setPadding(dp(20), dp(12), 0, dp(2))
-            listaResultados.addView(t)
-            for (f in favs.take(6)) {
-                listaResultados.addView(
-                    filaAtajo(R.drawable.ic_star_fill, f.nombre, if (f.detalle.isNotEmpty() && f.detalle != f.nombre) f.detalle else f.tipoTexto(), Color.parseColor("#F59E0B")) {
-                        seleccionarResultado(f)
-                    }
-                )
+            listaResultados.addView(encabezado("FAVORITOS", null) { })
+            for (f in favs.take(4)) {
+                val sub = listaDe(f) + (if (f.detalle.isNotEmpty() && f.detalle != f.nombre) " · " + f.detalle else "")
+                listaResultados.addView(filaAtajo(R.drawable.ic_star_fill, f.nombre, sub, Color.parseColor("#F59E0B")) { seleccionarResultado(f) })
             }
         }
     }
@@ -2507,34 +2800,58 @@ class MainActivity : Activity(), LocationListener {
         })
     }
 
-    private fun filaLugar(r: Resultado): LinearLayout {
+    /** Fila de tarjeta con ícono, título, subtítulo y, opcionalmente, botones a la derecha. */
+    private fun filaCaja(res: Int, tinte: Int, titulo: String, sub: String, accion: () -> Unit, vararg extra: Icono): LinearLayout {
         val pal = paleta()
         val f = caja(18, 14, 10)
         f.orientation = LinearLayout.HORIZONTAL
         f.gravity = Gravity.CENTER_VERTICAL
         f.isClickable = true
-        f.setOnClickListener { seleccionarResultado(r) }
-        val ico = icono(R.drawable.ic_place, 26, pal.acento)
+        f.setOnClickListener { accion() }
+        val ico = icono(res, 26, tinte)
         (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(12)
         f.addView(ico)
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(txt(15f, "sans-serif-medium", pal.texto).apply {
-            text = r.nombre
+            text = titulo
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
         })
         col.addView(txt(12f, "sans-serif", pal.sub).apply {
-            text = if (r.detalle.isNotEmpty() && r.detalle != r.nombre) r.detalle else r.tipoTexto()
+            text = sub
             setPadding(0, dp(2), 0, 0)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
         f.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        for (e in extra) f.addView(e)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.bottomMargin = dp(8)
+        f.layoutParams = lp
+        return f
+    }
+
+    private fun cajaTexto(t: String): LinearLayout {
+        val pal = paleta()
+        return caja(18, 16, 14).apply {
+            addView(txt(14f, "sans-serif", pal.sub).apply {
+                text = t
+                setLineSpacing(0f, 1.15f)
+            })
+            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.bottomMargin = dp(8)
+            layoutParams = lp
+        }
+    }
+
+    private fun filaLugar(r: Resultado): LinearLayout {
+        val pal = paleta()
         val editar = icono(R.drawable.ic_edit, 32, pal.sub)
         editar.setOnClickListener {
-            mostrarDialogo("Nombre del favorito", "", r.nombre, null, "Guardar") { t, _ -> renombrarFav(r, t) }
+            mostrarDialogo("Editar favorito", "", r.nombre, null, "Guardar", false, listaDe(r)) { t, _ ->
+                renombrarFav(r, t, dlgListaTexto)
+            }
         }
-        f.addView(editar)
         val borrar = icono(R.drawable.ic_delete, 34, pal.sub)
         borrar.setOnClickListener {
             val l = leerFavs()
@@ -2543,75 +2860,126 @@ class MainActivity : Activity(), LocationListener {
             actualizarEstrella()
             refrescarAjustes()
         }
-        f.addView(borrar)
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = dp(8)
-        f.layoutParams = lp
-        return f
+        val sub = if (r.detalle.isNotEmpty() && r.detalle != r.nombre) r.detalle else r.tipoTexto()
+        return filaCaja(R.drawable.ic_star_fill, Color.parseColor("#F59E0B"), r.nombre, sub, { seleccionarResultado(r) }, editar, borrar)
     }
 
     private fun filaCasaTrabajo(clave: String): LinearLayout {
         val pal = paleta()
         val p = leerLugar(clave)
-        val f = caja(18, 14, 12)
-        f.orientation = LinearLayout.HORIZONTAL
-        f.gravity = Gravity.CENTER_VERTICAL
-        f.isClickable = true
-        f.setOnClickListener { if (p != null) seleccionarResultado(p) else definirLugar(clave) }
-        val ico = icono(if (clave == "casa") R.drawable.ic_home else R.drawable.ic_work, 28, pal.acento)
-        (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
-        f.addView(ico)
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(txt(15f, "sans-serif-medium", pal.texto).apply { text = etiquetaLugar(clave) })
-        col.addView(txt(12.5f, "sans-serif", pal.sub).apply {
-            text = if (p != null) p.detalle.ifEmpty { "Guardado" } else "Toca para definir"
-            setPadding(0, dp(3), 0, 0)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-        })
-        f.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val extras = ArrayList<Icono>()
         if (p != null) {
             val cambiar = icono(R.drawable.ic_edit, 32, pal.sub)
             cambiar.setOnClickListener { definirLugar(clave) }
-            f.addView(cambiar)
             val quitar = icono(R.drawable.ic_delete, 34, pal.sub)
             quitar.setOnClickListener {
                 guardarLugar(clave, null)
                 actualizarEstrella()
                 refrescarAjustes()
             }
-            f.addView(quitar)
+            extras.add(cambiar)
+            extras.add(quitar)
         }
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = dp(8)
-        f.layoutParams = lp
+        return filaCaja(
+            if (clave == "casa") R.drawable.ic_home else R.drawable.ic_work, pal.acento, etiquetaLugar(clave),
+            if (p != null) p.detalle.ifEmpty { "Guardado" } else "Toca para definir",
+            { if (p != null) seleccionarResultado(p) else definirLugar(clave) },
+            *extras.toTypedArray()
+        )
+    }
+
+    private fun filaRutaHist(h: RutaHist): LinearLayout {
+        val pal = paleta()
+        val ir = icono(R.drawable.ic_play_arrow, 38, pal.acento)
+        ir.setOnClickListener { irDirecto(h.dest) }
+        val sub = (if (h.veces > 1) "${h.veces} veces" else "1 vez") + " · " + Geo.dist(h.dist) + " · " + fechaCorta(h.ultima)
+        return filaCaja(R.drawable.ic_directions, pal.acento, h.dest.nombre, sub, { seleccionarResultado(h.dest) }, ir)
+    }
+
+    private fun cabeceraLista(nombre: String, n: Int): LinearLayout {
+        val pal = paleta()
+        val f = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(12), 0, dp(6))
+        }
+        val ico = icono(R.drawable.ic_folder, 24, pal.acento)
+        (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(10)
+        f.addView(ico)
+        f.addView(txt(16f, "sans-serif-medium", pal.texto).apply { text = nombre })
+        f.addView(txt(12.5f, "sans-serif", pal.sub).apply {
+            text = "  ·  $n"
+        })
+        f.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        if (nombre != "Favoritos") {
+            val editar = icono(R.drawable.ic_edit, 30, pal.sub)
+            editar.setOnClickListener {
+                mostrarDialogo("Renombrar lista", "", nombre, null, "Guardar") { t, _ -> renombrarLista(nombre, t) }
+            }
+            val borrar = icono(R.drawable.ic_delete, 32, pal.sub)
+            borrar.setOnClickListener {
+                mostrarDialogo("Borrar lista", "Sus lugares pasarán a «Favoritos»; no se pierde ninguno.", null, null, "Borrar") { _, _ ->
+                    borrarLista(nombre)
+                }
+            }
+            f.addView(editar)
+            f.addView(borrar)
+        }
         return f
     }
 
     private fun tabLugares() {
-        val pal = paleta()
         val c = contenidoAjustes
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         c.addView(seccion("Casa y trabajo"))
         for (clave in arrayOf("casa", "trabajo")) c.addView(filaCasaTrabajo(clave))
-        c.addView(seccion("Favoritos"))
-        val favs = leerFavs()
-        if (favs.isEmpty()) {
-            c.addView(caja(18, 16, 14).apply {
-                addView(txt(14f, "sans-serif", pal.sub).apply {
-                    text = "Aún no tienes favoritos. Busca un lugar y toca la estrella para guardarlo."
-                    setLineSpacing(0f, 1.15f)
-                })
-            })
+
+        c.addView(seccion("Rutas frecuentes"))
+        val rutas = rutasFrecuentes(8)
+        if (rutas.isEmpty()) {
+            c.addView(cajaTexto("Aquí aparecerán las rutas que uses. Toca ▶ para volver a ir sin buscar de nuevo."))
         } else {
-            for (f in favs) c.addView(filaLugar(f))
+            for (h in rutas) c.addView(filaRutaHist(h))
+            c.addView(
+                crearBotonTexto("Borrar rutas recientes", false) { borrarRutasHist() },
+                LinearLayout.LayoutParams(wc, wc).apply { bottomMargin = dp(8) }
+            )
         }
-        c.addView(seccion("Rutas guardadas"))
-        c.addView(caja(18, 16, 14).apply {
-            addView(txt(14f, "sans-serif", pal.sub).apply {
-                text = "Aquí aparecerán tus rutas cuando llegue la navegación."
-                setLineSpacing(0f, 1.15f)
-            })
-        })
+
+        c.addView(seccion("Búsquedas recientes"))
+        val rec = leerArray("hist_busq")
+        if (rec.isEmpty()) {
+            c.addView(cajaTexto("Aquí aparecerán los lugares que busques."))
+        } else {
+            for (r in rec.take(8)) c.addView(filaCaja(R.drawable.ic_history, paleta().sub, r.nombre, r.tipoTexto(), { seleccionarResultado(r) }))
+            c.addView(
+                crearBotonTexto("Borrar búsquedas recientes", false) { borrarRecientes() },
+                LinearLayout.LayoutParams(wc, wc).apply { bottomMargin = dp(8) }
+            )
+        }
+
+        c.addView(seccion("Listas de lugares"))
+        c.addView(
+            crearBotonTexto("＋ Nueva lista", false) {
+                mostrarDialogo("Nueva lista", "Por ejemplo: Restaurantes, Familia o Viajes.", "", null, "Crear") { t, _ -> crearLista(t) }
+            },
+            LinearLayout.LayoutParams(wc, wc).apply { bottomMargin = dp(4) }
+        )
+        val favs = leerFavs()
+        for (nombre in leerListas()) {
+            val items = favs.filter { listaDe(it) == nombre }
+            c.addView(cabeceraLista(nombre, items.size))
+            if (items.isEmpty()) {
+                c.addView(
+                    cajaTexto(
+                        if (nombre == "Favoritos") "Aún no tienes favoritos. Busca un lugar y toca la estrella para guardarlo."
+                        else "Lista vacía. Guarda un lugar y elige esta lista."
+                    )
+                )
+            } else {
+                for (f in items) c.addView(filaLugar(f))
+            }
+        }
     }
 
     private fun filaInterruptor(titulo: String, sub: String, valor: Boolean, cambio: (Boolean) -> Unit): LinearLayout {
@@ -3325,11 +3693,13 @@ class MainActivity : Activity(), LocationListener {
                 if (indexando || cargandoGrafo) "Preparando el motor de rutas… intenta de nuevo en unos segundos."
                 else "El motor de rutas no está listo" + (if (errorGrafo.isNotEmpty()) ": $errorGrafo" else ".")
             )
+            autoIniciar = false
             return
         }
         val o = origenActual()
         if (o == null) {
             aviso("Aún no tengo tu posición. Espera el GPS, o mantén pulsado el mapa donde estés y toca «Estoy aquí».")
+            autoIniciar = false
             return
         }
         calculando = true
@@ -3337,48 +3707,118 @@ class MainActivity : Activity(), LocationListener {
         val oLat = o.latitude
         val oLon = o.longitude
         Thread {
-            var r: Ruta? = null
+            var rs: List<Ruta> = emptyList()
             var err = ""
             try {
-                r = g.ruta(oLat, oLon, d.lat, d.lon)
+                rs = g.alternativas(oLat, oLon, d.lat, d.lon)
             } catch (e: Throwable) {
                 err = if (e is OutOfMemoryError) "No hay memoria suficiente para calcular esta ruta." else (e.message ?: "No pude calcular la ruta.")
             }
-            val rr = r
+            val lista = rs
             ui.post {
                 calculando = false
-                if (rr == null || destino !== d) {
+                if (lista.isEmpty() || destino !== d) {
                     btnPrimario.text = "Cómo llegar"
-                    if (rr == null) aviso(err)
+                    autoIniciar = false
+                    if (lista.isEmpty()) aviso(err)
                 } else {
-                    vistaPrevia(rr)
+                    vistaPrevia(lista)
+                    if (autoIniciar) {
+                        autoIniciar = false
+                        iniciarNavegacion()
+                    }
                 }
             }
         }.start()
     }
 
-    private fun vistaPrevia(r: Ruta) {
-        ruta = r
+    /** Vista previa: muestra las opciones de ruta (más rápida, más corta, alternativas) para elegir antes de iniciar. */
+    private fun vistaPrevia(lista: List<Ruta>) {
+        rutasAlt = lista
+        idxSel = 0
+        ruta = lista[0]
         modoRuta = 1
         ponerRuta()
         btnPrimario.text = "Iniciar"
-        tvLugarSub.text = "${Geo.dist(r.distancia)} · ${tiempo(r.duracion)} · llegas ${hora(r.duracion)}"
+        actualizarResumenPrevio()
+        reconstruirAlternativas()
         try {
             val b = org.maplibre.android.geometry.LatLngBounds.Builder()
-            val paso = Math.max(1, r.lat.size / 300)
-            var i = 0
-            while (i < r.lat.size) {
-                b.include(LatLng(r.lat[i], r.lon[i]))
-                i += paso
+            for (r in lista) {
+                val paso = Math.max(1, r.lat.size / 200)
+                var i = 0
+                while (i < r.lat.size) {
+                    b.include(LatLng(r.lat[i], r.lon[i]))
+                    i += paso
+                }
+                b.include(LatLng(r.lat[r.lat.size - 1], r.lon[r.lon.size - 1]))
             }
-            b.include(LatLng(r.lat[r.lat.size - 1], r.lon[r.lon.size - 1]))
-            map?.animateCamera(CameraUpdateFactory.newLatLngBounds(b.build(), dp(80), dp(90), dp(80), dp(190)))
+            map?.animateCamera(CameraUpdateFactory.newLatLngBounds(b.build(), dp(80), dp(90), dp(80), dp(230)))
         } catch (e: Exception) { /* ruta de un solo punto */ }
+        ajustarColumnas()
+    }
+
+    private fun actualizarResumenPrevio() {
+        val r = ruta ?: return
+        tvLugarSub.text = "Llegas ${hora(r.duracion)} · ${Geo.dist(r.distancia)} · ${tiempo(r.duracion)}"
+    }
+
+    /** Tarjetas de opciones de ruta (solo en la vista previa y si hay más de una). */
+    private fun reconstruirAlternativas() {
+        filaAlt.removeAllViews()
+        if (modoRuta != 1 || rutasAlt.size < 2) {
+            filaAlt.visibility = View.GONE
+            return
+        }
+        filaAlt.visibility = View.VISIBLE
+        val pal = paleta()
+        val base = rutasAlt[0]
+        for (i in rutasAlt.indices) {
+            val r = rutasAlt[i]
+            val sel = i == idxSel
+            val c = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                isClickable = true
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(16).toFloat()
+                    setColor(if (sel) Color.argb(28, Color.red(pal.acento), Color.green(pal.acento), Color.blue(pal.acento)) else Color.TRANSPARENT)
+                    setStroke(dp(if (sel) 2 else 1), if (sel) pal.acento else pal.borde)
+                }
+                setOnClickListener {
+                    idxSel = i
+                    ruta = rutasAlt[i]
+                    ponerRuta()
+                    actualizarResumenPrevio()
+                    reconstruirAlternativas()
+                }
+            }
+            c.addView(txt(11.5f, "sans-serif-medium", if (sel) pal.acento else pal.sub).apply {
+                text = r.etiqueta
+                maxLines = 1
+            })
+            c.addView(txt(17f, "sans-serif-medium", pal.texto).apply {
+                text = tiempo(r.duracion)
+                setPadding(0, dp(2), 0, 0)
+            })
+            val dif = r.duracion - base.duracion
+            c.addView(txt(12f, "sans-serif", pal.sub).apply {
+                text = Geo.dist(r.distancia) + (if (i > 0 && dif >= 30.0) " · +" + tiempo(dif) else "")
+                maxLines = 1
+            })
+            filaAlt.addView(c, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(8) })
+        }
     }
 
     private fun iniciarNavegacion() {
         val r = ruta ?: return
         modoRuta = 2
+        val destinoRuta = destino
+        if (destinoRuta != null) registrarRuta(destinoRuta, r)
+        rutasAlt = emptyList()
+        reconstruirAlternativas()
+        ponerRuta()
+        barraProgreso.progreso = 0f
         follow = true
         rumboArriba = true
         zoomActual = map?.cameraPosition?.zoom ?: 15.0
@@ -3429,7 +3869,10 @@ class MainActivity : Activity(), LocationListener {
         tvNavDist.text = Geo.dist(aSig)
         tvNavTexto.text = p.texto()
         tvNavEta.text = hora(eta)
-        tvNavResto.text = "${Geo.dist(restante)} · ${tiempo(eta)}"
+        tvNavDistR.text = Geo.dist(restante)
+        tvNavTiempo.text = tiempo(eta)
+        barraProgreso.progreso = (u.along / r.total).toFloat()
+        barraProgreso.invalidate()
         anunciar(sig, aSig, p)
         if (restante < 25.0) finalizarNavegacion(true)
     }
@@ -3512,6 +3955,10 @@ class MainActivity : Activity(), LocationListener {
         ruta = null
         modoRuta = 0
         calculando = false
+        rutasAlt = emptyList()
+        idxSel = 0
+        autoIniciar = false
+        reconstruirAlternativas()
         ponerRuta()
         btnPrimario.text = "Cómo llegar"
         bannerNav.visibility = View.GONE
@@ -3522,8 +3969,21 @@ class MainActivity : Activity(), LocationListener {
 
     private fun ponerRuta() {
         val r = ruta
-        val json = if (r == null) "{\"type\":\"FeatureCollection\",\"features\":[]}" else r.geojson()
-        estilo?.getSourceAs<GeoJsonSource>("ruta")?.setGeoJson(json)
+        val vacio = "{\"type\":\"FeatureCollection\",\"features\":[]}"
+        estilo?.getSourceAs<GeoJsonSource>("ruta")?.setGeoJson(if (r == null) vacio else r.geojson())
+        // En la vista previa, las otras opciones se dibujan más tenues
+        val sb = StringBuilder("{\"type\":\"FeatureCollection\",\"features\":[")
+        var n = 0
+        if (modoRuta == 1) {
+            for (o in rutasAlt) {
+                if (o === r) continue
+                if (n > 0) sb.append(',')
+                sb.append("{\"type\":\"Feature\",\"properties\":{},\"geometry\":").append(o.geojson()).append('}')
+                n++
+            }
+        }
+        sb.append("]}")
+        estilo?.getSourceAs<GeoJsonSource>("rutaAlt")?.setGeoJson(if (n == 0) vacio else sb.toString())
     }
 
     // ── Simulación del recorrido (para probar sin salir a la calle) ──

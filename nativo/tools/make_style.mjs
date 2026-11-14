@@ -78,7 +78,17 @@ function estilo(flavor) {
   }
   L = L.filter(l => l.type !== 'symbol' || (l.layout && l.layout['text-field']));
   const dark = flavor === 'dark';
-  // Ruta de navegación (línea con contorno), por debajo de los marcadores
+  // Rutas alternativas (más tenues) y ruta elegida (línea con contorno), por debajo de los marcadores
+  L.push(
+    { id: 'ralt-contorno', type: 'line', source: 'rutaAlt',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': dark ? '#0B1730' : '#FFFFFF',
+               'line-width': ['interpolate', ['linear'], ['zoom'], 6, 4, 12, 8, 17, 14] } },
+    { id: 'ralt-linea', type: 'line', source: 'rutaAlt',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': dark ? '#7C8FB8' : '#94A3B8',
+               'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.5, 12, 5, 17, 9] } }
+  );
   L.push(
     { id: 'ruta-contorno', type: 'line', source: 'ruta',
       layout: { 'line-cap': 'round', 'line-join': 'round' },
@@ -112,6 +122,7 @@ function estilo(flavor) {
       yo: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       destino: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       ruta: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
+      rutaAlt: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
     },
     layers: L,
   };
