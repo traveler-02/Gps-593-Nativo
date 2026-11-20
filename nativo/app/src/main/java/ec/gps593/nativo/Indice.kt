@@ -207,6 +207,47 @@ class IndiceLugares private constructor(private val bytes: ByteArray) {
         return out
     }
 
+    /**
+     * Lugares cercanos de ciertos tipos (p. ej. 11 = gasolineras), ordenados por distancia, sin internet.
+     * `palabras` (opcional) filtra además por nombre/categoría (p. ej. "farmacia").
+     */
+    fun cercanos(tipos: Set<Int>, palabras: List<String>, lat: Double, lon: Double, radioM: Double, max: Int): List<Resultado> {
+        val tb = palabras.map { Texto.norm(it).toByteArray(Charsets.UTF_8) }
+        val cos = Math.cos(lat * Math.PI / 180.0)
+        var hits = LongArray(256)
+        var cnt = 0
+        for (i in 0 until total) {
+            val t = bytes[posTipo + i].toInt()
+            if (tipos.isNotEmpty() && t !in tipos) continue
+            val dx = (bb.getInt(posLon + 4 * i) / 1e5 - lon) * cos * 111320.0
+            val dy = (bb.getInt(posLat + 4 * i) / 1e5 - lat) * 111320.0
+            val d = Math.hypot(dx, dy)
+            if (d > radioM) continue
+            if (tb.isNotEmpty()) {
+                val a = baseNorm + bb.getInt(posNormOff + 4 * i)
+                val b = baseNorm + bb.getInt(posNormOff + 4 * (i + 1))
+                var alguna = false
+                for (x in tb) if (indexOf(a, b, x) >= 0) { alguna = true; break }
+                if (!alguna) continue
+            }
+            if (cnt == hits.size) hits = hits.copyOf(cnt * 2)
+            hits[cnt++] = (Math.min(0xFFFFFL, d.toLong()) shl 24) or i.toLong()
+        }
+        java.util.Arrays.sort(hits, 0, cnt)
+        val out = ArrayList<Resultado>()
+        val vistos = HashSet<String>()
+        for (h in 0 until cnt) {
+            if (out.size >= max) break
+            val idx = (hits[h] and 0xFFFFFFL).toInt()
+            val nom = nombreDe(idx)
+            val cat = categoriaDe(idx)
+            if (!vistos.add(nom + "|" + bb.getInt(posLat + 4 * idx))) continue
+            out.add(Resultado(nom, bb.getInt(posLat + 4 * idx) / 1e5, bb.getInt(posLon + 4 * idx) / 1e5,
+                bytes[posTipo + idx].toInt(), "", cat, "sin internet"))
+        }
+        return out
+    }
+
     companion object {
         /** Carga un índice ya construido. Devuelve null si el archivo no es válido. */
         fun cargar(f: File): IndiceLugares? {

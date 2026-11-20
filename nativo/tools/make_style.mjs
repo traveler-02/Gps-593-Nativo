@@ -5,8 +5,10 @@ import { layers, namedFlavor } from '@protomaps/basemaps';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
 // Capas que NO se dibujan (más ligeras = más cuadros por segundo en una radio modesta)
+// v2.0: se recuperan edificios 2D, direcciones, lugares de interés y sentidos de calle (con zoom mínimo).
+// Siguen fuera los escudos de carretera (necesitan sprites/imágenes).
 const QUITAR = [
-  /^buildings$/, /^address_label$/, /^pois$/, /^roads_shields$/, /^roads_oneway$/,
+  /^roads_shields$/,
   /^landuse_(zoo|pier|runway|aerodrome|school|hospital|industrial|beach|pedestrian)$/,
   /^roads_(runway|taxiway|pier|rail)$/,
   /^roads_tunnels_.*_casing$/, /^roads_bridges_.*_casing$/,
@@ -77,6 +79,9 @@ function estilo(flavor) {
     }
   }
   L = L.filter(l => l.type !== 'symbol' || (l.layout && l.layout['text-field']));
+  // Capas recuperadas: aparecen solo al acercarse, para cuidar los cuadros por segundo en radios modestas
+  const MINZ = { buildings: 15, address_label: 17, pois: 15, roads_oneway: 16 };
+  for (const l of L) if (MINZ[l.id] !== undefined) l.minzoom = Math.max(l.minzoom ?? 0, MINZ[l.id]);
   const dark = flavor === 'dark';
   // Rutas alternativas (más tenues) y ruta elegida (línea con contorno), por debajo de los marcadores
   L.push(

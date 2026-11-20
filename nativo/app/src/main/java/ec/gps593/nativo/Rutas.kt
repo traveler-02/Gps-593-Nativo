@@ -79,7 +79,9 @@ class Ubic(val d: Double, val i: Int, val along: Double)
 /** Una ruta calculada: línea, distancia, duración y maniobras. */
 class Ruta(
     val lat: DoubleArray, val lon: DoubleArray, val distancia: Double, val duracion: Double,
-    val pasos: List<Paso>, val segs: IntArray = IntArray(0)
+    val pasos: List<Paso>, val segs: IntArray = IntArray(0),
+    /** Distancia y tiempo acumulados al final de cada tramo de la ruta (para una ETA real, no proporcional). */
+    val cumD: DoubleArray = DoubleArray(0), val cumT: DoubleArray = DoubleArray(0)
 ) {
     /** Nombre de la opción ("Más rápida", "Más corta", "Alternativa"). */
     var etiqueta = ""
@@ -95,6 +97,23 @@ class Ruta(
             p.inicio = a * k
             a += p.distancia
         }
+    }
+
+    /** Segundos que faltan desde `along` metros (medidos sobre la línea dibujada), según el tiempo de cada tramo. */
+    fun tiempoRestante(along: Double): Double {
+        if (cumD.isEmpty() || cumT.size != cumD.size || total <= 0.0) {
+            return duracion * (Math.max(0.0, total - along) / (if (total > 0.0) total else 1.0))
+        }
+        val k = if (distancia > 0.0) total / distancia else 1.0
+        val d = along / k
+        var i = 0
+        while (i < cumD.size - 1 && cumD[i] < d) i++
+        val d0 = if (i == 0) 0.0 else cumD[i - 1]
+        val t0 = if (i == 0) 0.0 else cumT[i - 1]
+        val len = cumD[i] - d0
+        val f = if (len > 0.0) Math.max(0.0, Math.min(1.0, (d - d0) / len)) else 1.0
+        val hecho = t0 + (cumT[i] - t0) * f
+        return Math.max(0.0, cumT[cumT.size - 1] - hecho)
     }
 
     /** Punto más cercano de la ruta a (la, lo), buscando solo entre los tramos desde..hasta. */
@@ -316,7 +335,7 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
     }
 
     /** Calle más cercana a (lat, lon). */
-    private fun snap(lat: Double, lon: Double): Snap? {
+    private fun snap(lat: Double, lon: Double, maxM: Double): Snap? {
         val la = lat * 1e6
         val lo = lon * 1e6
         val cy = Math.floor((la - minLat) / CS).toInt()
@@ -357,6 +376,7 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
             if (best != null && found < 0) found = r
         }
         val b = best ?: return null
+        if (b.d > maxM) return null      // calle demasiado lejos: no se inventa una conexión
         var antes = 0.0
         var total = 0.0
         for (i in gOff.get(b.s) until gOff.get(b.s + 1) - 1) {
@@ -492,8 +512,8 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
         fromLat: Double, fromLon: Double, toLat: Double, toLon: Double,
         modo: Int = 0, pen: BooleanArray? = null, factor: Double = 1.0
     ): Ruta {
-        val a = snap(fromLat, fromLon) ?: throw IOException("Tu posición está fuera de la zona de los datos de rutas.")
-        val b = snap(toLat, toLon) ?: throw IOException("El destino está fuera de la zona de los datos de rutas.")
+        val a = snap(fromLat, fromLon, SNAP_MAX_ORIGEN) ?: throw IOException("No hay una calle a menos de ${SNAP_MAX_ORIGEN.toInt()} m de tu posición: no se puede calcular una ruta fiable.")
+        val b = snap(toLat, toLon, SNAP_MAX_DESTINO) ?: throw IOException("No hay una calle a menos de ${SNAP_MAX_DESTINO.toInt()} m del destino: no se puede calcular una ruta fiable.")
         val fa = flags(a.s)
         val fb = flags(b.s)
         // Costo de recorrer un tramo según el criterio: tiempo (con penalización opcional) o distancia
@@ -600,8 +620,18 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
             tTot += p.time
         }
         val usados = IntArray(piezas.size)
-        for (i in piezas.indices) usados[i] = piezas[i].s
-        return Ruta(la, lo, dTot, tTot, pasos, usados)
+        val cD = DoubleArray(piezas.size)
+        val cT = DoubleArray(piezas.size)
+        var aD = 0.0
+        var aT = 0.0
+        for (i in piezas.indices) {
+            usados[i] = piezas[i].s
+            aD += piezas[i].len
+            aT += piezas[i].time
+            cD[i] = aD
+            cT[i] = aT
+        }
+        return Ruta(la, lo, dTot, tTot, pasos, usados, cD, cT)
     }
 
     /** Fracción (0 a 1) del largo de `a` que recorre los mismos tramos que `b`. */
@@ -657,6 +687,9 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
 
     companion object {
         private const val CS = 20000                 // celda de 0,02° (unidades de 1e-6°)
+        /** Distancia máxima (m) para asociar tu posición / el destino a una calle. */
+        const val SNAP_MAX_ORIGEN = 250.0
+        const val SNAP_MAX_DESTINO = 600.0
         private const val VMAX = 110.0 / 3.6         // velocidad máxima del heurístico (m/s)
 
         /** Abre el .g593 sin copiarlo al heap y prepara la cuadrícula de búsqueda de calles. */

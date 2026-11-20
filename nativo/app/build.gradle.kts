@@ -17,8 +17,8 @@ android {
         minSdk = 21
         // 29: en radios con Android 10/11 mantiene el acceso clásico a /storage/XXXX-XXXX (pendrive)
         targetSdk = 29
-        versionCode = 10
-        versionName = "1.0-prototipo"
+        versionCode = 11
+        versionName = "2.0-beta.1"
         ndk { abiFilters.addAll(abis) }
     }
 

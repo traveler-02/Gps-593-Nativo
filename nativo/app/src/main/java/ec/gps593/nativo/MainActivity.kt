@@ -73,7 +73,7 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val VERSION = "1.0"
+private const val VERSION = "2.0-beta.1"
 private const val REQ_ARCHIVOS = 77
 private const val REQ_PERM_UBICACION = 1
 private const val REQ_PERM_ALMACEN = 2
@@ -228,6 +228,14 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var tvNavDist: TextView
     private lateinit var tvNavTexto: TextView
     private lateinit var barraNav: LinearLayout
+    private lateinit var filaTop: LinearLayout
+    private lateinit var cardVelocidad: LinearLayout
+    private lateinit var espacioNav: View
+    private lateinit var btnVoz: Icono
+    private lateinit var tvOffline: TextView
+    private val busqLocal = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val busqRed = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val NAV_FONDO = Color.parseColor("#EC141D36")
     private lateinit var tvNavEta: TextView
     private lateinit var tvNavDistR: TextView
     private lateinit var tvNavTiempo: TextView
@@ -293,6 +301,13 @@ class MainActivity : Activity(), LocationListener {
 
     /** dp escalados según el tamaño de la pantalla. */
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density * escala).toInt()
+
+    /** Tamaño de controles táctiles: nunca menos de 48 dp reales, aunque la pantalla sea pequeña. */
+    private fun dpT(v: Int): Int = Math.max(dp(v), (48 * resources.displayMetrics.density).toInt())
+
+    private fun hayInternet(): Boolean = try {
+        (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).activeNetworkInfo?.isConnected == true
+    } catch (e: Exception) { false }
 
     private fun paleta(): Paleta =
         if (night) Paleta(
@@ -588,7 +603,7 @@ class MainActivity : Activity(), LocationListener {
 
     private fun botonRedondo(res: Int, tam: Int, accion: () -> Unit): Icono {
         val b = Icono(this, res, true, 0.27f)
-        b.layoutParams = LinearLayout.LayoutParams(dp(tam), dp(tam)).apply { setMargins(0, dp(6), 0, dp(6)) }
+        b.layoutParams = LinearLayout.LayoutParams(dpT(tam), dpT(tam)).apply { setMargins(0, dp(6), 0, dp(6)) }
         b.setOnClickListener { accion() }
         botones.add(b)
         iconos.add(b)
@@ -681,6 +696,7 @@ class MainActivity : Activity(), LocationListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        filaTop = fila
         val cardVel = tarjeta(26).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(10), dp(20), dp(10))
@@ -709,7 +725,9 @@ class MainActivity : Activity(), LocationListener {
         filaGps.addView(tvGps)
         cardVel.addView(filaVel)
         cardVel.addView(filaGps)
-        fila.addView(cardVel, LinearLayout.LayoutParams(wc, wc))
+        tvOffline = texto(11f, "sans-serif-medium").apply { setPadding(0, dp(3), 0, 0) }
+        cardVel.addView(tvOffline)
+        cardVelocidad = cardVel
 
         val pill = tarjeta(30).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -722,24 +740,23 @@ class MainActivity : Activity(), LocationListener {
         pill.addView(icoBuscar)
         tvBusqueda = texto(16f).apply { text = "¿A dónde vamos?" }
         pill.addView(tvBusqueda)
-        fila.addView(pill, LinearLayout.LayoutParams(0, dp(56), 1f).apply { leftMargin = dp(12) })
         pillBusqueda = pill
 
         // Banner de la próxima maniobra (reemplaza a la búsqueda mientras navegas)
         bannerNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(18), dp(10))
+            setPadding(dp(14), dp(12), dp(18), dp(12))
             visibility = View.GONE
             elevation = dp(8).toFloat()
         }
-        icoNav = icono(R.drawable.ic_straight, 46)
+        icoNav = icono(R.drawable.ic_straight, 52)
         icoNav.destacado = true
         (icoNav.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
         iconos.add(icoNav)
         bannerNav.addView(icoNav)
         val colNav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        tvNavDist = texto(30f, "sans-serif-medium").apply { setTextColor(Color.WHITE) }
+        tvNavDist = texto(34f, "sans-serif-medium").apply { setTextColor(Color.WHITE) }
         tvNavTexto = texto(14f).apply {
             setTextColor(Color.parseColor("#E6FFFFFF"))
             maxLines = 2
@@ -749,9 +766,20 @@ class MainActivity : Activity(), LocationListener {
         colNav.addView(tvNavDist)
         colNav.addView(tvNavTexto)
         bannerNav.addView(colNav, LinearLayout.LayoutParams(0, wc, 1f))
-        fila.addView(bannerNav, LinearLayout.LayoutParams(0, wc, 1f).apply { leftMargin = dp(12) })
+        espacioNav = View(this)
+        // Modo normal: [velocidad][búsqueda]. Navegando: [maniobra]....[velocidad] (ver acomodarFilaSuperior)
+        fila.addView(cardVel, LinearLayout.LayoutParams(wc, wc))
+        fila.addView(pill, LinearLayout.LayoutParams(0, dp(56), 1f).apply { leftMargin = dp(12) })
+        bannerNav.layoutParams = LinearLayout.LayoutParams(dp(360), wc)
         raiz.addView(fila, FrameLayout.LayoutParams(mw, wc, Gravity.TOP).apply {
             setMargins(dp(14), dp(14), dp(14), 0)
+        })
+
+        // ── Arriba a la derecha (solo navegando): silenciar / activar la voz ──
+        btnVoz = botonRedondo(if (vozOn) R.drawable.ic_volume_up else R.drawable.ic_volume_off, 50) { alternarVoz() }
+        btnVoz.visibility = View.GONE
+        raiz.addView(btnVoz, FrameLayout.LayoutParams(dpT(50), dpT(50), Gravity.TOP or Gravity.END).apply {
+            setMargins(0, dp(106), dp(14), 0)
         })
 
         // ── Abajo a la izquierda: modo día/noche y ajustes ──
@@ -809,7 +837,7 @@ class MainActivity : Activity(), LocationListener {
         col.addView(tvLugarTitulo)
         col.addView(tvLugarSub)
         arriba.addView(col, LinearLayout.LayoutParams(0, wc, 1f))
-        val cerrar = icono(R.drawable.ic_close, 30)
+        val cerrar = icono(R.drawable.ic_close, 44)
         iconos.add(cerrar)
         cerrar.setOnClickListener { ocultarLugar() }
         arriba.addView(cerrar)
@@ -833,7 +861,7 @@ class MainActivity : Activity(), LocationListener {
             LinearLayout.LayoutParams(wc, wc).apply { leftMargin = dp(8) }
         )
         abajo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        btnFav = icono(R.drawable.ic_star_line, 34)
+        btnFav = icono(R.drawable.ic_star_line, 44)
         iconos.add(btnFav)
         btnFav.setOnClickListener { alternarFavorito() }
         abajo.addView(btnFav)
@@ -856,39 +884,43 @@ class MainActivity : Activity(), LocationListener {
         return col
     }
 
-    /** Panel inferior durante la navegación: avance de la ruta, hora de llegada, distancia y tiempo restantes. */
+    /** Panel inferior durante la navegación: tiempo restante (verde), hora de llegada · distancia y botón X para salir. */
     private fun crearBarraNav() {
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
-        val mw = ViewGroup.LayoutParams.MATCH_PARENT
-        barraNav = tarjeta(26).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(14), dp(16), dp(12))
+        barraNav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(24), dp(10))
             visibility = View.GONE
+            elevation = dp(8).toFloat()
+            background = GradientDrawable().apply {
+                cornerRadius = dp(28).toFloat()
+                setColor(NAV_FONDO)
+                setStroke(dp(1), Color.parseColor("#22FFFFFF"))
+            }
         }
+        val salir = Icono(this, R.drawable.ic_close, true, 0.28f).apply {
+            tinte = Color.WHITE
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#33FFFFFF")) }
+            layoutParams = LinearLayout.LayoutParams(dpT(52), dpT(52)).apply { rightMargin = dp(16) }
+            setOnClickListener { finalizarNavegacion(false) }
+        }
+        barraNav.addView(salir)
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        tvNavTiempo = texto(24f, "sans-serif-medium").apply { setTextColor(Color.parseColor("#4ADE80")) }
+        tvNavEta = texto(15f, "sans-serif").apply {
+            setTextColor(Color.parseColor("#E6FFFFFF"))
+            setPadding(0, dp(3), 0, 0)
+        }
+        col.addView(tvNavTiempo)
+        col.addView(tvNavEta)
+        barraNav.addView(col)
+        // Vistas que ya no se muestran en la barra (se mantienen para no romper el resto del código)
+        tvNavDistR = texto(15f)
         barraProgreso = Barra(this)
-        barraNav.addView(barraProgreso, LinearLayout.LayoutParams(mw, dp(6)))
-        tvNavEta = texto(21f, "sans-serif-medium")
-        tvNavDistR = texto(21f, "sans-serif-medium")
-        tvNavTiempo = texto(21f, "sans-serif-medium")
-        val datos = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(12), 0, 0)
-        }
-        datos.addView(columnaDato("LLEGADA", tvNavEta), LinearLayout.LayoutParams(0, wc, 1f))
-        datos.addView(columnaDato("DISTANCIA", tvNavDistR), LinearLayout.LayoutParams(0, wc, 1f))
-        datos.addView(columnaDato("TIEMPO", tvNavTiempo), LinearLayout.LayoutParams(0, wc, 1f))
-        barraNav.addView(datos)
-        val acciones = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            setPadding(0, dp(10), 0, 0)
-        }
         btnSimular = botonTexto("Simular", false) { alternarSimulacion() }
-        acciones.addView(btnSimular, LinearLayout.LayoutParams(wc, wc).apply { rightMargin = dp(8) })
-        acciones.addView(botonTexto("Salir", true) { finalizarNavegacion(false) })
-        barraNav.addView(acciones)
-        raiz.addView(barraNav, FrameLayout.LayoutParams(dp(480), wc, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(24)
+        raiz.addView(barraNav, FrameLayout.LayoutParams(wc, wc, Gravity.BOTTOM or Gravity.START).apply {
+            setMargins(dp(14), 0, 0, dp(24))
         })
     }
 
@@ -1152,7 +1184,7 @@ class MainActivity : Activity(), LocationListener {
             })
         }
         fila.addView(etBusqueda, LinearLayout.LayoutParams(0, wc, 1f))
-        val borrar = icono(R.drawable.ic_close, 32).also { iconos.add(it) }
+        val borrar = icono(R.drawable.ic_close, 44).also { iconos.add(it) }
         borrar.setOnClickListener {
             if (etBusqueda.text.isNotEmpty()) etBusqueda.setText("") else cerrarBusqueda()
         }
@@ -1275,7 +1307,8 @@ class MainActivity : Activity(), LocationListener {
         (scrollResultados.layoutParams as LinearLayout.LayoutParams).height = Math.min(dp(320), (h * 0.5f).toInt())
         val anchoInf = if (w < dp(760)) w - dp(28) else Math.min(dp(520), w - dp(180))
         (tarjetaLugar.layoutParams as FrameLayout.LayoutParams).width = anchoInf
-        (barraNav.layoutParams as FrameLayout.LayoutParams).width = anchoInf
+        (bannerNav.layoutParams as LinearLayout.LayoutParams).width = Math.min(dp(380), (w * 0.62f).toInt())
+        bannerNav.requestLayout()
         (cardDlg.layoutParams as FrameLayout.LayoutParams).width = Math.min(dp(520), w - dp(28))
         cardDlg.requestLayout()
         barraNav.requestLayout()
@@ -1292,8 +1325,10 @@ class MainActivity : Activity(), LocationListener {
             val inf: View? = if (barraNav.visibility == View.VISIBLE) barraNav
             else if (tarjetaLugar.visibility == View.VISIBLE) tarjetaLugar else null
             val sube = if (estrecho && inf != null) -(inf.height + dp(10)).toFloat() else 0f
+            // La tarjeta de navegación vive abajo a la izquierda: los botones de esa esquina siempre suben
+            val subeIzq = if (barraNav.visibility == View.VISIBLE) -(barraNav.height + dp(10)).toFloat() else sube
             derAbajo.animate().translationY(sube).setDuration(150L).start()
-            izqAbajo.animate().translationY(sube).setDuration(150L).start()
+            izqAbajo.animate().translationY(subeIzq).setDuration(150L).start()
         }
     }
 
@@ -1350,12 +1385,12 @@ class MainActivity : Activity(), LocationListener {
         tvPct.setTextColor(pal.sub)
         tvLugarTitulo.setTextColor(pal.texto)
         tvLugarSub.setTextColor(pal.sub)
-        bannerNav.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(pal.acento, pal.acento2)).apply {
-            cornerRadius = dp(26).toFloat()
+        bannerNav.background = GradientDrawable().apply {
+            cornerRadius = dp(28).toFloat()
+            setColor(NAV_FONDO)
+            setStroke(dp(1), Color.parseColor("#22FFFFFF"))
         }
-        tvNavEta.setTextColor(pal.texto)
-        tvNavDistR.setTextColor(pal.texto)
-        tvNavTiempo.setTextColor(pal.texto)
+        tvOffline.setTextColor(pal.sub)
         for (e in etiquetasSub) e.setTextColor(pal.sub)
         etBusqueda.setTextColor(pal.texto)
         etBusqueda.setHintTextColor(pal.sub)
@@ -1702,6 +1737,9 @@ class MainActivity : Activity(), LocationListener {
             val errores = ArrayList<String>()
             var nuevoMapa = false
             var nuevasRutas = false
+            // Instalación segura: primero se copia todo a archivos "*.nuevo"; solo si TODO salió bien se activan,
+            // conservando la versión anterior hasta el final (si algo falla, vuelve la anterior).
+            val pendientes = ArrayList<Triple<File, File, Int>>()
             for ((k, f) in fuentes.withIndex()) {
                 val tmp = File(carpeta, "instalando.tmp")
                 try {
@@ -1722,6 +1760,7 @@ class MainActivity : Activity(), LocationListener {
                         leidos >= 4 && String(cab, 0, 4, Charsets.US_ASCII) == "G593" -> 1
                         else -> throw RuntimeException("«${f.nombre}» no es un archivo .pmtiles ni .g593")
                     }
+                    if (tipo == 0 && cab[7].toInt() != 3) throw RuntimeException("«${f.nombre}» es un PMTiles de una versión no compatible")
                     val destinoArchivo = File(carpeta, if (tipo == 0) "ecuador.pmtiles" else "ecuador.g593")
                     val etiqueta = if (tipo == 0) "el mapa" else "las rutas y la búsqueda"
                     if (f.total > 0 && StatFs(carpeta.path).availableBytes < f.total + 50_000_000L) {
@@ -1749,19 +1788,49 @@ class MainActivity : Activity(), LocationListener {
                             }
                         }
                     }
-                    if (destinoArchivo.exists()) destinoArchivo.delete()
-                    if (!tmp.renameTo(destinoArchivo)) throw RuntimeException("no pude guardar el archivo")
-                    if (tipo == 0) {
-                        nuevoMapa = true
-                    } else {
-                        nuevasRutas = true
-                        File(carpeta, "lugares.idx").delete()      // se vuelve a construir con el archivo nuevo
-                    }
+                    if (f.total > 0 && tmp.length() != f.total) throw RuntimeException("la copia de «${f.nombre}» quedó incompleta")
+                    val stage = File(carpeta, destinoArchivo.name + ".nuevo")
+                    stage.delete()
+                    if (!tmp.renameTo(stage)) throw RuntimeException("no pude guardar el archivo")
+                    pendientes.add(Triple(stage, destinoArchivo, tipo))
                 } catch (e: Exception) {
                     tmp.delete()
                     errores.add(e.message ?: "error desconocido")
                 }
             }
+            if (errores.isEmpty()) {
+                val hechos = ArrayList<Triple<File, File, Boolean>>()      // destino, copia anterior, existía
+                try {
+                    for ((stage, dest, tipo) in pendientes) {
+                        val bak = File(dest.path + ".bak")
+                        bak.delete()
+                        val existia = dest.exists()
+                        if (existia && !dest.renameTo(bak)) throw RuntimeException("no pude reservar la versión anterior")
+                        if (!stage.renameTo(dest)) {
+                            if (existia) bak.renameTo(dest)
+                            throw RuntimeException("no pude activar el archivo nuevo")
+                        }
+                        hechos.add(Triple(dest, bak, existia))
+                        if (tipo == 0) nuevoMapa = true
+                        else {
+                            nuevasRutas = true
+                            File(carpeta, "lugares.idx").delete()      // se vuelve a construir con el archivo nuevo
+                        }
+                    }
+                    for (h in hechos) h.second.delete()
+                } catch (e: Exception) {
+                    for (h in hechos.reversed()) {
+                        h.first.delete()
+                        if (h.third) h.second.renameTo(h.first)
+                    }
+                    nuevoMapa = false
+                    nuevasRutas = false
+                    errores.add((e.message ?: "error al activar los archivos") + " (se conservó la versión anterior)")
+                }
+            } else {
+                errores.add("No se instaló nada para no mezclar versiones: se conserva lo que ya tenías.")
+            }
+            for (pd in pendientes) pd.first.delete()
             ui.post { finalizarInstalacion(errores, nuevoMapa, nuevasRutas) }
         }.start()
     }
@@ -1839,6 +1908,7 @@ class MainActivity : Activity(), LocationListener {
                 versionNueva = man.version
                 val totalGeneral = man.totalBytes()
                 var antes = 0L
+                val pendientes = ArrayList<Triple<File, File, Int>>()
                 for ((k, a) in man.archivos.withIndex()) {
                     val etiqueta = if (a.nombre.endsWith(".pmtiles", true)) "el mapa" else "las rutas y la búsqueda"
                     textoInstal = "Descargando $etiqueta (${k + 1} de ${man.archivos.size})…"
@@ -1870,14 +1940,39 @@ class MainActivity : Activity(), LocationListener {
                         throw RuntimeException("«${a.nombre}» no es un archivo de mapa válido")
                     }
                     val destinoArchivo = File(carpeta, if (tipo == 0) "ecuador.pmtiles" else "ecuador.g593")
-                    if (destinoArchivo.exists()) destinoArchivo.delete()
-                    if (!parte.renameTo(destinoArchivo)) throw RuntimeException("no pude guardar «${a.nombre}»")
-                    if (tipo == 0) {
-                        nuevoMapa = true
-                    } else {
-                        nuevasRutas = true
-                        File(carpeta, "lugares.idx").delete()
+                    val stage = File(carpeta, destinoArchivo.name + ".nuevo")
+                    stage.delete()
+                    if (!parte.renameTo(stage)) throw RuntimeException("no pude guardar «${a.nombre}»")
+                    pendientes.add(Triple(stage, destinoArchivo, tipo))
+                }
+                // Activación segura: solo si TODO se descargó y verificó; si algo falla vuelve la versión anterior
+                val hechos = ArrayList<Triple<File, File, Boolean>>()
+                try {
+                    for ((stage, dest, tipo) in pendientes) {
+                        val bak = File(dest.path + ".bak")
+                        bak.delete()
+                        val existia = dest.exists()
+                        if (existia && !dest.renameTo(bak)) throw RuntimeException("no pude reservar la versión anterior")
+                        if (!stage.renameTo(dest)) {
+                            if (existia) bak.renameTo(dest)
+                            throw RuntimeException("no pude activar el archivo nuevo")
+                        }
+                        hechos.add(Triple(dest, bak, existia))
+                        if (tipo == 0) nuevoMapa = true
+                        else {
+                            nuevasRutas = true
+                            File(carpeta, "lugares.idx").delete()
+                        }
                     }
+                    for (h in hechos) h.second.delete()
+                } catch (e: Exception) {
+                    for (h in hechos.reversed()) {
+                        h.first.delete()
+                        if (h.third) h.second.renameTo(h.first)
+                    }
+                    nuevoMapa = false
+                    nuevasRutas = false
+                    throw RuntimeException((e.message ?: "error al activar los archivos") + " (se conservó la versión anterior)")
                 }
             } catch (e: Descarga.Cancelada) {
                 errores.add("descarga cancelada (si la repites, continúa donde quedó)")
@@ -2030,7 +2125,8 @@ class MainActivity : Activity(), LocationListener {
             val rLon = if (l != null) l.longitude else if (centroMapa != null) centroMapa.longitude else Double.NaN
             refLat = rLat
             refLon = rLon
-            Thread {
+            busqLocal.execute {
+                if (id != busquedaId) return@execute      // ya se escribió otra consulta
                 val lista = ArrayList<Resultado>()
                 var fallo = false
                 try {
@@ -2038,24 +2134,96 @@ class MainActivity : Activity(), LocationListener {
                 } catch (e: Throwable) {
                     fallo = true
                 }
-                // Si hay pocos resultados sin internet, se completa con la búsqueda en línea (si hay conexión)
-                if (lista.size < 6 && q.length >= 3) {
-                    try {
-                        for (r in BusquedaEnLinea.buscar(q)) {
-                            val nr = Texto.norm(r.nombre)
-                            val repetido = lista.any { x ->
-                                Texto.norm(x.nombre) == nr || Geo.dm(x.lat, x.lon, r.lat, r.lon) < 80.0
+                val guardados = coincidenciasGuardadas(q)
+                val locales = guardados + lista.filter { r -> guardados.none { g -> mismoLugar(g, r) } }
+                // 1) Los resultados locales se muestran SIEMPRE y de inmediato
+                ui.post { if (id == busquedaId) mostrarResultados(locales, q, if (fallo && locales.isEmpty()) "error" else "") }
+                // 2) Internet solo complementa, y solo si hay conexión real
+                if (lista.size < 6 && q.length >= 3 && hayInternet()) {
+                    busqRed.execute {
+                        if (id != busquedaId) return@execute
+                        val extra = ArrayList<Resultado>()
+                        try {
+                            for (r in BusquedaEnLinea.buscar(q)) {
+                                val nr = Texto.norm(r.nombre)
+                                val repetido = locales.any { x ->
+                                    Texto.norm(x.nombre) == nr || Geo.dm(x.lat, x.lon, r.lat, r.lon) < 80.0
+                                } || extra.any { x -> Texto.norm(x.nombre) == nr }
+                                if (!repetido) extra.add(r)
                             }
-                            if (!repetido) lista.add(r)
-                        }
-                    } catch (e: Throwable) {
-                        if (lista.isEmpty()) fallo = true
+                        } catch (e: Throwable) { /* sin respuesta: ya se muestran los resultados locales */ }
+                        if (extra.isNotEmpty()) ui.post { if (id == busquedaId) mostrarResultados(locales + extra, q, "") }
                     }
                 }
-                val guardados = coincidenciasGuardadas(q)
-                val todos = guardados + lista.filter { r -> guardados.none { g -> mismoLugar(g, r) } }
-                ui.post { if (id == busquedaId) mostrarResultados(todos, q, if (fallo && lista.isEmpty()) "error" else "") }
-            }.start()
+            }
+        }
+    }
+
+    // ── Categorías rápidas y lugares cercanos (índice local, sin internet) ──
+
+    private fun iconoLugar(r: Resultado): Int = when {
+        r.categoria == "Parqueadero" -> R.drawable.ic_parking
+        r.categoria == "Farmacia" || r.categoria == "Droguería" -> R.drawable.ic_pharmacy
+        r.tipo == 11 -> R.drawable.ic_gas
+        r.tipo == 8 -> R.drawable.ic_restaurant
+        r.tipo == 9 -> R.drawable.ic_hospital
+        r.tipo == 7 -> R.drawable.ic_store
+        else -> R.drawable.ic_place
+    }
+
+    private fun agregarCategorias(pal: Paleta) {
+        val cats = arrayOf(
+            Triple("Gasolineras", setOf(11), emptyList<String>()),
+            Triple("Restaurantes", setOf(8), emptyList<String>()),
+            Triple("Hospitales", setOf(9), listOf("hospital", "clinica", "salud")),
+            Triple("Farmacias", setOf(9), listOf("farmacia", "drogueria")),
+            Triple("Parqueaderos", setOf(15), listOf("parqueadero", "parking", "estacionamiento")),
+            Triple("Tiendas", setOf(7), emptyList<String>())
+        )
+        listaResultados.addView(txt(12f, "sans-serif-medium", pal.sub).apply {
+            text = "BUSCAR CERCA"
+            letterSpacing = 0.08f
+            setPadding(dp(20), dp(12), dp(20), dp(6))
+        })
+        val sc = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val fila = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), 0, dp(16), dp(8))
+        }
+        for ((nombre, tipos, palabras) in cats) {
+            fila.addView(
+                chip(nombre, false) { buscarCercanos(nombre, tipos, palabras) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpT(44)).apply { rightMargin = dp(8) }
+            )
+        }
+        sc.addView(fila)
+        listaResultados.addView(sc)
+    }
+
+    private fun buscarCercanos(nombre: String, tipos: Set<Int>, palabras: List<String>) {
+        val ind = indice
+        if (ind == null) {
+            aviso("Para buscar lugares cercanos sin internet instala el archivo .g593 en Ajustes › Mapas.")
+            return
+        }
+        val l = lastLoc
+        val c = map?.cameraPosition?.target
+        val la = if (l != null) l.latitude else if (c != null) c.latitude else Double.NaN
+        val lo = if (l != null) l.longitude else if (c != null) c.longitude else Double.NaN
+        if (la.isNaN() || lo.isNaN()) {
+            aviso("Aún no hay una posición de referencia.")
+            return
+        }
+        refLat = la
+        refLon = lo
+        val id = ++busquedaId
+        busqLocal.execute {
+            val res = try { ind.cercanos(tipos, palabras, la, lo, 5000.0, 20) } catch (e: Throwable) { emptyList() }
+            ui.post {
+                if (id != busquedaId) return@post
+                if (res.isEmpty()) aviso("No encontré ${nombre.lowercase(Locale.ROOT)} a menos de 5 km.")
+                else mostrarResultados(res, "", "")
+            }
         }
     }
 
@@ -2092,7 +2260,10 @@ class MainActivity : Activity(), LocationListener {
         val pal = paleta()
         listaResultados.removeAllViews()
         if (res.isEmpty()) {
-            if (q.length < 2) agregarAtajos(pal)
+            if (q.length < 2) {
+                agregarCategorias(pal)
+                agregarAtajos(pal)
+            }
             val msg = when {
                 q.length < 2 && indice != null ->
                     "Escribe un lugar, barrio o calle.\nBúsqueda sin internet lista · ${indice?.total ?: 0} lugares."
@@ -2121,7 +2292,7 @@ class MainActivity : Activity(), LocationListener {
             val guardado = r.detalle.isNotEmpty()
             val icRes = if (guardado && r.nombre == "Casa") R.drawable.ic_home
             else if (guardado && r.nombre == "Trabajo") R.drawable.ic_work
-            else if (guardado) R.drawable.ic_star_fill else R.drawable.ic_place
+            else if (guardado) R.drawable.ic_star_fill else iconoLugar(r)
             val ico = icono(icRes, 26, if (guardado && icRes == R.drawable.ic_star_fill) Color.parseColor("#F59E0B") else pal.acento)
             (ico.layoutParams as LinearLayout.LayoutParams).rightMargin = dp(14)
             fila.addView(ico)
@@ -3130,7 +3301,7 @@ class MainActivity : Activity(), LocationListener {
             val actualVoz = try { tts?.voice?.name } catch (e: Exception) { null }
             val filaVoces = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             val scrollVoces = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-            for ((i, v) in vocesEs.take(8).withIndex()) {
+            for ((i, v) in vocesEs.sortedBy { it.isNetworkConnectionRequired }.take(8).withIndex()) {
                 val pais = v.locale.displayCountry
                 val nombre = "Voz ${i + 1}" + (if (pais.isNotEmpty()) " · $pais" else "") + (if (v.isNetworkConnectionRequired) " ☁" else "")
                 filaVoces.addView(
@@ -3148,11 +3319,27 @@ class MainActivity : Activity(), LocationListener {
             cv.addView(scrollVoces)
         }
         cv.addView(txt(12f, "sans-serif", pal.sub).apply {
-            text = "Si la voz suena en otro idioma o poco clara, instala o elige una voz en español en «Voces del sistema»."
+            text = "Las voces con ☁ necesitan internet y no hablarán sin conexión. Si la voz suena en otro idioma o poco clara, instala una voz en español en «Voces del sistema»."
             setPadding(0, dp(14), 0, 0)
             setLineSpacing(0f, 1.15f)
         })
         c.addView(cv)
+
+        c.addView(seccion("Pruebas y diagnóstico"))
+        val cp = caja(20, 16, 14)
+        cp.addView(txt(15f, "sans-serif-medium", pal.texto).apply { text = "Simular recorrido" })
+        cp.addView(txt(12.5f, "sans-serif", pal.sub).apply {
+            text = if (modoRuta == 2) "Recorre la ruta actual sin salir a la calle (solo para pruebas)."
+            else "Inicia una navegación y vuelve aquí para simular el recorrido."
+            setPadding(0, dp(3), 0, dp(12))
+        })
+        if (modoRuta == 2) {
+            cp.addView(chip(if (simulando) "Detener simulación" else "Simular recorrido", simulando) {
+                alternarSimulacion()
+                cerrarAjustes()
+            })
+        }
+        c.addView(cp)
     }
 
     // ───────────────────────── voz ─────────────────────────
@@ -3220,8 +3407,18 @@ class MainActivity : Activity(), LocationListener {
         } catch (e: Exception) {
             vocesEs = emptyList()
         }
+        // La navegación debe hablar sin internet: se prefieren siempre las voces que no necesitan red
+        val sinRed = vocesEs.filter { !it.isNetworkConnectionRequired }
         val guardada = vocesEs.firstOrNull { it.name == vozNombre }
-        if (guardada != null) m.setVoice(guardada)
+        val elegidaVoz: Voice? = when {
+            guardada != null && (!guardada.isNetworkConnectionRequired || hayInternet()) -> guardada
+            sinRed.isNotEmpty() -> sinRed.firstOrNull { it.locale == elegido } ?: sinRed[0]
+            else -> guardada
+        }
+        if (elegidaVoz != null) m.setVoice(elegidaVoz)
+        if (vocesEs.isNotEmpty() && sinRed.isEmpty()) {
+            aviso("Las voces en español de este equipo necesitan internet. Descarga una voz sin conexión en «Voces del sistema».")
+        }
         m.setSpeechRate(velVoz)
         m.setPitch(1.0f)
         try {
@@ -3831,6 +4028,9 @@ class MainActivity : Activity(), LocationListener {
         pillBusqueda.visibility = View.GONE
         bannerNav.visibility = View.VISIBLE
         barraNav.visibility = View.VISIBLE
+        acomodarFilaSuperior(true)
+        btnVoz.res = if (vozOn) R.drawable.ic_volume_up else R.drawable.ic_volume_off
+        btnVoz.visibility = View.VISIBLE
         btnSimular.text = if (simulando) "Detener" else "Simular"
         ajustarColumnas()
         hablar(r.pasos[0].texto())
@@ -3858,7 +4058,7 @@ class MainActivity : Activity(), LocationListener {
             fueraCont = 0
         }
         val restante = Math.max(0.0, r.total - u.along)
-        val eta = r.duracion * (restante / r.total)
+        val eta = r.tiempoRestante(u.along)
         var k = 0
         while (k + 1 < r.pasos.size && r.pasos[k + 1].inicio <= u.along) k++
         val sig = Math.min(k + 1, r.pasos.size - 1)
@@ -3868,7 +4068,7 @@ class MainActivity : Activity(), LocationListener {
         icoNav.invalidate()
         tvNavDist.text = Geo.dist(aSig)
         tvNavTexto.text = p.texto()
-        tvNavEta.text = hora(eta)
+        tvNavEta.text = hora(eta) + " · " + Geo.dist(restante)
         tvNavDistR.text = Geo.dist(restante)
         tvNavTiempo.text = tiempo(eta)
         barraProgreso.progreso = (u.along / r.total).toFloat()
@@ -3963,8 +4163,32 @@ class MainActivity : Activity(), LocationListener {
         btnPrimario.text = "Cómo llegar"
         bannerNav.visibility = View.GONE
         barraNav.visibility = View.GONE
+        btnVoz.visibility = View.GONE
+        acomodarFilaSuperior(false)
         pillBusqueda.visibility = View.VISIBLE
         ajustarColumnas()
+    }
+
+    /** Normal: [velocidad][búsqueda]. Navegando: [maniobra] ... [velocidad]. */
+    private fun acomodarFilaSuperior(nav: Boolean) {
+        filaTop.removeAllViews()
+        if (nav) {
+            filaTop.addView(bannerNav)
+            filaTop.addView(espacioNav, LinearLayout.LayoutParams(0, 1, 1f))
+            filaTop.addView(cardVelocidad)
+        } else {
+            filaTop.addView(cardVelocidad)
+            filaTop.addView(pillBusqueda)
+        }
+    }
+
+    private fun alternarVoz() {
+        vozOn = !vozOn
+        prefs.edit().putBoolean("voz", vozOn).apply()
+        if (!vozOn) tts?.stop()
+        btnVoz.res = if (vozOn) R.drawable.ic_volume_up else R.drawable.ic_volume_off
+        btnVoz.invalidate()
+        aviso(if (vozOn) "Voz activada" else "Voz silenciada")
     }
 
     private fun ponerRuta() {
@@ -4080,6 +4304,10 @@ class MainActivity : Activity(), LocationListener {
         val kmh = if (l != null && (edad <= 5 || esSintetica(l))) Math.round(velMs * 3.6f) else 0
         tvVelocidad.text = kmh.toString()
         tvGps.text = msg
+        tvOffline.visibility = if (modoRuta == 2) View.GONE else View.VISIBLE
+        tvOffline.text = "Sin internet · mapa " + (if (mapPath != null) "✓" else "✗") +
+            " · rutas " + (if (grafo != null) "✓" else if (cargandoGrafo) "…" else "✗") +
+            " · búsqueda " + (if (indice != null) "✓" else if (indexando) "…" else "✗")
         (puntoGps.background as? GradientDrawable)?.setColor(color)
     }
 
