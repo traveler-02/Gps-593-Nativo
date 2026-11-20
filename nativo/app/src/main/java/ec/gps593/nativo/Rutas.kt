@@ -697,9 +697,38 @@ class GrafoRutas private constructor(private val bb: ByteBuffer, private val cal
             val raf = RandomAccessFile(f, "r")
             try {
                 val ch = raf.channel
-                val bb = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size())
+                val size = ch.size()
+                // ByteBuffer/map() usa índices Int en Android. Rechazar archivos imposibles
+                // antes de mapearlos evita excepciones/OOM con descargas truncadas o dañadas.
+                if (size < 28L) throw IOException("el archivo .g593 está incompleto (cabecera truncada)")
+                if (size > Int.MAX_VALUE.toLong()) throw IOException("el archivo .g593 supera el tamaño máximo compatible")
+                val cab = ByteBuffer.allocate(28).order(ByteOrder.LITTLE_ENDIAN)
+                var pos = 0L
+                while (cab.hasRemaining()) {
+                    val n = ch.read(cab, pos)
+                    if (n <= 0) throw IOException("no se pudo leer la cabecera .g593")
+                    pos += n
+                }
+                cab.flip()
+                if (cab.getInt(0) != 0x33393547) throw IOException("no es un archivo .g593")
+                if (cab.getInt(4) != 1) throw IOException("versión .g593 no compatible")
+                val nN = cab.getInt(8).toLong()
+                val nS = cab.getInt(12).toLong()
+                val nP = cab.getInt(16).toLong()
+                val nA = cab.getInt(20).toLong()
+                val nBlob = cab.getInt(24).toLong()
+                if (nN <= 0L || nS <= 0L || nP < 2L || nA <= 0L || nBlob < 2L ||
+                    nN > Int.MAX_VALUE || nS > Int.MAX_VALUE || nP > Int.MAX_VALUE ||
+                    nA > Int.MAX_VALUE || nBlob > Int.MAX_VALUE) {
+                    throw IOException("el archivo .g593 contiene contadores inválidos")
+                }
+                // Debe coincidir exactamente con el formato generado por tools/build_graph.py.
+                // Se calcula en Long para evitar desbordamientos al validar archivos corruptos.
+                val expected = 28L + 8L * nN + 4L * (nN + 1L) + 4L * nA +
+                    20L * nS + 4L * (nS + 1L) + 8L * nP + nS + nBlob
+                if (expected != size) throw IOException("el archivo .g593 está truncado o tiene una estructura inválida")
+                val bb = ch.map(FileChannel.MapMode.READ_ONLY, 0, size)
                 bb.order(ByteOrder.LITTLE_ENDIAN)
-                if (bb.getInt(0) != 0x33393547) throw IOException("no es un archivo .g593")
                 val g = GrafoRutas(bb, calles)
                 g.construirRejilla()
                 return g
